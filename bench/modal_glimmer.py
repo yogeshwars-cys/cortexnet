@@ -246,15 +246,23 @@ def swe_run(n, cap_usd, arm=None):
     def gen(ids):
         t = time.time()
         x = torch.tensor([ids], device="cuda")
-        try:
-            with torch.no_grad():
-                y = model.generate(x, attention_mask=torch.ones_like(x), max_new_tokens=1024, eos_token_id=stops,
-                                   pad_token_id=stops[-1])
-        except torch.OutOfMemoryError:            # the context no longer fits the GPU: the episode ends, recorded
-            del x
-            torch.cuda.empty_cache()
-            print(f"  out of GPU memory at {len(ids):,} context tokens", flush=True)
-            return None
+        for attempt in range(2):
+            try:
+                with torch.no_grad():
+                    y = model.generate(x, attention_mask=torch.ones_like(x), max_new_tokens=1024, eos_token_id=stops,
+                                       pad_token_id=stops[-1])
+                break
+            except torch.OutOfMemoryError:        # the context no longer fits the GPU: the episode ends, recorded
+                del x
+                torch.cuda.empty_cache()
+                print(f"  out of GPU memory at {len(ids):,} context tokens", flush=True)
+                return None
+            except RuntimeError as e:             # cuDNN attention backend failure: retry once without it
+                if attempt or "cuDNN" not in str(e):
+                    raise
+                torch.cuda.empty_cache()
+                torch.backends.cuda.enable_cudnn_sdp(False)
+                print(f"  cuDNN attention failed at {len(ids):,} tokens; retrying without cuDNN SDPA", flush=True)
         new = y[0, len(ids):].tolist()
         n_gen[0] += len(new)
         n_gen[1] += time.time() - t

@@ -15,7 +15,7 @@ that request is a miss, and the misses are what the coprocessor learns from.
 | **Cortex-SubNN coprocessor** (below) | built, cross-validated on 854 logged reads |
 | 64-byte symbol codes (`cortexnet/codec.py`) | built, no measurable ranking loss |
 | Live A/B, Meta Muse Spark 1.3 (Meta Model API) as the agent | run, 14 tasks |
-| Live A/B, Meta Muse Glimmer 30B (self-hosted) as the agent, on SWE-bench Lite | run, 18 paired tasks so far (40 in progress) |
+| Live A/B, Meta Muse Glimmer 30B (self-hosted) as the agent, on SWE-bench Lite | run, 39 paired tasks |
 
 ## Why
 
@@ -37,23 +37,28 @@ symbol gets picked. Picking it is the coprocessor's job, and the live A/B is the
 
 **Glimmer 30B as the agent** (`bench/swe_agent.py`, `bench/modal_glimmer.py::ab`, report `bench/results/swe_ab.md`).
 SWE-bench Lite, one H100 per arm, the same tasks with whole-file reads, with CortexNET, and with CortexNET plus fading
-(a read drops to its outline once the agent moves on). Paired over the 18 tasks every arm has finished so far:
+(a read drops to its outline once the agent moves on). Paired over the 39 tasks every arm finished (95% CIs from a
+paired bootstrap over tasks):
 
 | | whole file | CortexNET | CortexNET + fade |
 |---|---|---|---|
-| prefill tokens (the model re-reads its context every turn) | 184k | 0.58x [0.44, 0.82] | 0.52x [0.40, 0.71] |
-| peak context | 18.3k | 0.49x | 0.45x |
-| peak KV cache (Glimmer's layout: 13 full-attention layers grow, 39 sliding-window layers cap at 2k) | 310 MB | 0.61x | 0.59x |
-| file tokens put into context | 262k | 35% | 34% |
-| turns | 17 | 1.19x | 1.09x |
-| submitted the gold file / gold symbol | 94% / 56% | 89% / 56% | 89% / 56% |
+| prefill tokens (the model re-reads its context every turn) | 195k | 0.58x [0.47, 0.71] | 0.56x [0.45, 0.72] |
+| peak context | 20.4k | 0.47x [0.40, 0.56] | 0.42x [0.36, 0.50] |
+| peak KV cache (Glimmer's layout: 13 full-attention layers grow, 39 sliding-window layers cap at 2k) | 337 MB | 0.59x [0.53, 0.67] | 0.56x [0.49, 0.63] |
+| file tokens put into context | 636k | 33% | 31% |
+| turns | 17 | 1.16x [1.02, 1.32] | 1.19x [1.03, 1.38] |
+| generation time | 165 s | 0.98x | 1.07x |
+| submitted the gold file / gold symbol | 82% / 41% | 85% / 46% | 82% / 41% |
+
+Task success is unchanged within noise (gold symbol, CortexNET vs whole: 4 tasks only CortexNET solved, 2 only whole
+solved, exact McNemar p = 0.69; fade vs whole 1 and 1). One whole-file episode hit the 60k-token context limit.
 
 One whole-file episode ran the 80 GB GPU out of memory; the same task fit on a rerun, and both CortexNET arms solved
 it, fade at 0.43x the prefill and 0.54x the peak KV (`bench/results/swe_incident_xarray_4094.md`). Whole-file reads
 also show what the agent used: from the
-attention of a full-attention layer, 80% of the attention on code bodies lands on 56% of the code shown, and ranking
-symbols by that attention finds the needed ones at MRR 0.81 (random 0.20). That gives labels for reads the agent never
-comes back to.
+attention of a full-attention layer (65 whole-file reads), 80% of the attention on code bodies lands on 56% of the
+code shown, and ranking symbols by that attention finds the needed ones at MRR 0.85 (random 0.21, 40 labelled reads).
+That gives labels for reads the agent never comes back to.
 
 **Muse Spark 1.3 as the agent** (Meta Model API, `bench/live_ab.py --meta`, 14 code questions): both arms 14/14
 correct; CortexNET used 52% of the input tokens and 43% of the cost. The gain is all on large files.
@@ -91,8 +96,8 @@ Measured, see `bench/results/`:
 - Switching between the two encoders online (Hedge) or stacking them with a per-read gate: +0.012 to +0.014 MRR,
   not significant (`subnn_hedge.md`, `subnn_fuse.md`).
 - Glimmer's raw hidden state at the read decision as the query, on 55 live cases: 0.49-0.53 vs 0.73 for MiniLM on the
-  text (a 6,656-d projection overfits). Reading it through Glimmer's own vocabulary (logit lens) is above chance but
-  weak so far (0.38 vs 0.32 random, 18 reads).
+  text (a 6,656-d projection overfits). Reading it through Glimmer's own vocabulary (logit lens, symbol names scored
+  by their word pieces) is at chance: MRR 0.29-0.32 vs 0.30 random over 91 reads.
 
 ## Use
 
