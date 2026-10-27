@@ -68,8 +68,27 @@ def handle(reader, req):
     raise LookupError(m)
 
 
+def options(env=os.environ):
+    """Opt-in extras: CORTEXNET_COPROC=<exported head .npz> (needs torch + transformers for MiniLM),
+    CORTEXNET_POLICY=rule_ab, CORTEXNET_GRAPH=1, CORTEXNET_CTX_BASE=<tokens of context before the first read>."""
+    kw = dict(policy=env.get("CORTEXNET_POLICY", "budget"), ctx_base=int(env.get("CORTEXNET_CTX_BASE", "20000")))
+    if env.get("CORTEXNET_COPROC"):
+        try:
+            from .coproc import Coprocessor, MiniLM
+            kw["coproc"] = Coprocessor(env["CORTEXNET_COPROC"], encoder=MiniLM())
+        except (ImportError, OSError) as e:
+            print(f"cortexnet: coprocessor off ({type(e).__name__}: {e})", file=sys.stderr)
+    if env.get("CORTEXNET_GRAPH") == "1":
+        from .graph import CoNeedGraph
+        state = env.get("CORTEXNET_STATE") or os.path.join(os.getcwd(), ".cortexnet")
+        path = os.path.join(state, "graph.npz")
+        kw["graph"] = CoNeedGraph.load(path) if os.path.exists(path) else CoNeedGraph()
+    return kw
+
+
 def main(stdin=sys.stdin, stdout=sys.stdout):
-    reader = Reader(os.environ.get("CORTEXNET_STATE"), split_tokens=int(os.environ.get("CORTEXNET_SPLIT", "600")))
+    reader = Reader(os.environ.get("CORTEXNET_STATE"), split_tokens=int(os.environ.get("CORTEXNET_SPLIT", "600")),
+                    **options())
     for line in stdin:
         line = line.strip()
         if not line:

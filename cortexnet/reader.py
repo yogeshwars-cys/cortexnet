@@ -12,6 +12,15 @@ Session state the scores use:
   active   recently touched symbols (ranged, approved, included, edited) for the symbol-graph feature
   edits    every call checks the files seen so far for changes on disk, so edits made by other tools count too
 Every call is appended to <state_dir>/events.jsonl.
+
+Optional (all off by default):
+  coproc   a cortexnet.coproc.Coprocessor: its calibrated probabilities replace the include model's for leaf
+           symbols (semantic context from the prompt, the reasoning snapshot or a live hidden state, and the
+           symbols the session touched last); the include model keeps learning from the same events.
+  policy   "rule_ab": choose the up-front set (or the whole file) by Rule A/B under the prefix-cache cost
+           (cortexnet/policy.py) instead of filling a fixed budget.
+  graph    a cortexnet.graph.CoNeedGraph over the coprocessor's code cells: ranged/approved symbols are co-needs,
+           and the [connected] menu also offers co-needed symbols from any file seen before.
 """
 import difflib
 import json
@@ -22,6 +31,7 @@ import numpy as np
 
 from .learn import FEATURES, IncludeModel, featurize, idents
 from .outline import outline, symbols, tokens
+from .policy import H_REM_PRIOR, effective_turn, rule_ab
 
 DECAY = 0.7
 SRC_EXT = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".go", ".rs", ".c", ".cc", ".cpp", ".h", ".hpp", ".java",
@@ -34,7 +44,10 @@ def numbered(lines, a, b):
 
 class Reader:
     def __init__(self, state_dir=None, full_below=800, budget_frac=0.25, budget_min=400, tau=0.5, horizon=10,
-                 features=None, menu=False, menu_size=3, tau_menu=0.35, neighbours=40, split_tokens=0):
+                 features=None, menu=False, menu_size=3, tau_menu=0.35, neighbours=40, split_tokens=0,
+                 coproc=None, policy="budget", ctx_base=20000, h_rem=H_REM_PRIOR, graph=None):
+        self.coproc, self.policy, self.ctx_base, self.h_rem, self.graph = coproc, policy, ctx_base, h_rem, graph
+        self.served, self.text_of, self.cell_of = 0, {}, {}      # tokens returned; trail texts; symbol -> cell
         self.state_dir = state_dir or os.path.join(os.getcwd(), ".cortexnet")
         os.makedirs(self.state_dir, exist_ok=True)
         self.model = IncludeModel(os.path.join(self.state_dir, "include.json"), horizon=horizon)
@@ -66,12 +79,32 @@ class Reader:
             return
         for s in st["syms"]:
             if s.start <= b and s.end >= a and not s.children:
-                body = idents("\n".join(st["lines"][s.start - 1:s.end]))
-                self.active.append([weight, (p, s.start, s.end), s.name.lower(), body])
+                text = "\n".join(st["lines"][s.start - 1:s.end])
+                self.active.append([weight, (p, s.start, s.end), s.name.lower(), idents(text)])
+                self.text_of[(p, s.start, s.end)] = s.name + "\n" + text[:800]
         self.active = self.active[-30:]
+
+    def _cells(self, p, a, b):
+        st = self.files.get(p) or {}
+        return [self.cell_of[(p, s.start, s.end)] for s in st.get("syms", [])
+                if s.start <= b and s.end >= a and not s.children and (p, s.start, s.end) in self.cell_of]
+
+    def _trail(self):
+        """Cache context for the coprocessor: the last touched symbols, newest first, as (weight, text)."""
+        out, seen = [], set()
+        for w, k, _, _ in reversed(self.active):
+            if k not in seen and k in self.text_of:
+                seen.add(k)
+                out.append((w, self.text_of[k]))
+        return out[:6]
 
     def _tick(self):
         self.calls += 1
+        if self.graph is not None:
+            frames = len(self.graph.history)
+            self.graph.tick()
+            if len(self.graph.history) > frames:
+                self.graph.save(os.path.join(self.state_dir, "graph.npz"))
         self.trail = {w: v * DECAY for w, v in self.trail.items() if v * DECAY > 0.02}
         for a in self.active:
             a[0] *= DECAY
@@ -195,8 +228,60 @@ class Reader:
             picked.append(f"  {mid} {os.path.basename(q)}:{s.name} (lines {s.start}-{s.end}, ~{cost} tok)")
         return picked
 
+    def _need(self, p, a, b):
+        if self.graph is not None:
+            self.graph.need(self._cells(p, a, b))
+
+    def _graph_menu(self, p):
+        """Symbols from any file seen before: the cells most co-needed with the touched symbols' cells first, then
+        the touched cells themselves (semantically adjacent at plane-0 resolution)."""
+        if self.graph is None or not self.cell_of:
+            return []
+        cells = list(dict.fromkeys(self.cell_of[k] for _, k, _, _ in reversed(self.active) if k in self.cell_of))
+        taken = {m["key"] for m in self.menu.values()}
+        picked = []
+        for cell, w in self.graph.neighbours(cells, k=10) + [(c, None) for c in cells]:   # cells newest first
+            for key, name in self.graph.members.get(cell, {}).items():
+                q, a, b = key
+                if q == p or key in taken or a in self.files.get(q, {}).get("shown", set()) or not os.path.isfile(q):
+                    continue
+                with open(q, encoding="utf8", errors="replace") as f:
+                    cost = tokens("\n".join(f.read().split("\n")[a - 1:b]))
+                self.menu_n += 1
+                mid = f"#{self.menu_n}"
+                self.menu[mid] = dict(path=q, a=a, b=b, key=key, name=name, cost=cost)
+                taken.add(key)
+                why = "same semantic cell" if w is None else f"co-needed {w:.1f}"
+                picked.append(f"  {mid} {os.path.basename(q)}:{name} (lines {a}-{b}, ~{cost} tok, {why})")
+                if len(picked) >= self.menu_size:
+                    return picked
+        return picked
+
     # ---------------------------------------------------------------- tools
-    def read(self, path, query="", approve=()):
+    def _whole(self, pre, p, text, lines, full, mode):
+        out = numbered(lines, 1, len(lines))
+        st = self._state(p, lines, self._symbols(text, p))
+        st["shown"] = set(range(1, len(lines) + 1))
+        self._log(op="read", path=p, file_tokens=full, shown_tokens=tokens(out), mode=mode, included=0)
+        self.served += tokens(out)
+        return pre + out
+
+    def _semantic(self, p, lines, syms, X, query, snapshot, qvec):
+        """Coprocessor probabilities for the leaf symbols; registers their cells in the graph."""
+        leaf = [k for k, s in enumerate(syms) if not s.children]
+        ls = [syms[k] for k in leaf]
+        pc = self.coproc.prob(p, lines, ls, X[leaf], prompt=query, snapshot=snapshot, trail=self._trail(), qvec=qvec)
+        if self.graph is not None and self.coproc.codec is not None:
+            from .graph import symbol_cells
+            for s, codes in zip(ls, self.coproc.symbol_codes(p, lines, ls)):
+                if len(codes):
+                    cell = symbol_cells(self.coproc.codec, codes)
+                    self.cell_of[(p, s.start, s.end)] = cell
+                    self.graph.add_symbol(cell, (p, s.start, s.end), s.name)
+        return leaf, pc
+
+    def read(self, path, query="", approve=(), snapshot="", qvec=None):
+        """snapshot: the agent's current reasoning; qvec: a live hidden-state query vector (coprocessor only)."""
         pre = self.approve(approve) if approve else ""
         self._tick()
         p, text, lines, changed = self._load(path)
@@ -206,26 +291,38 @@ class Reader:
         for ev in [e for e in self.events if e["path"] == p and "menu" not in e]:
             self._finalize(ev)
         if full <= self.full_below:
-            out = numbered(lines, 1, len(lines))
-            st = self._state(p, lines, self._symbols(text, p))
-            st["shown"] = set(range(1, len(lines) + 1))
-            self._log(op="read", path=p, file_tokens=full, shown_tokens=tokens(out), mode="whole", included=0)
-            return pre + out
+            return self._whole(pre, p, text, lines, full, "whole")
         syms = self._symbols(text, p)
         X, _ = self._features(p, syms, lines, query, changed)
         P = self.model.prob(X)
-        budget = max(self.budget_min, self.budget_frac * full)
-        inc, used, taken = [False] * len(syms), 0, []
-        for k in sorted(range(len(syms)), key=lambda k: -P[k]):
-            s = syms[k]
-            if P[k] < self.tau or s.children:
-                continue
-            cost = tokens("\n".join(lines[s.start - 1:s.end]))
-            if used + cost > budget or any(not (s.end < a or s.start > b) for a, b in taken):
-                continue
-            inc[k], used = True, used + cost
-            taken.append((s.start, s.end))
-        parts = [outline(text, p, syms)]
+        if self.coproc is not None:
+            leaf, pc = self._semantic(p, lines, syms, X, query, snapshot, qvec)
+            P = np.array(P, float)
+            P[leaf] = pc
+        head = outline(text, p, syms)
+        inc, taken = [False] * len(syms), []
+        if self.policy == "rule_ab":
+            leaf = [k for k, s in enumerate(syms) if not s.children]
+            cost = [tokens("\n".join(lines[syms[k].start - 1:syms[k].end])) for k in leaf]
+            pick = rule_ab(dict(cost=cost, out_tok=tokens(head), file_tok=full), [P[k] for k in leaf],
+                           effective_turn(self.ctx_base + self.served, self.h_rem))
+            if pick is None:
+                return self._whole(pre, p, text, lines, full, "bypass")
+            for i in pick:
+                inc[leaf[i]] = True
+                taken.append((syms[leaf[i]].start, syms[leaf[i]].end))
+        else:
+            budget, used = max(self.budget_min, self.budget_frac * full), 0
+            for k in sorted(range(len(syms)), key=lambda k: -P[k]):
+                s = syms[k]
+                if P[k] < self.tau or s.children:
+                    continue
+                cost = tokens("\n".join(lines[s.start - 1:s.end]))
+                if used + cost > budget or any(not (s.end < a or s.start > b) for a, b in taken):
+                    continue
+                inc[k], used = True, used + cost
+                taken.append((s.start, s.end))
+        parts = [head]
         st = self._state(p, lines, syms)
         st["shown"] = set()
         for a, b in sorted(taken):
@@ -235,13 +332,14 @@ class Reader:
             self._touch(p, a, b, 0.5)
         self.events.append(dict(path=p, call=self.calls, X=X, spans=[(s.start, s.end) for s in syms], included=inc,
                                 requests=[]))
-        menu = self._menu(p, query)
+        menu = self._graph_menu(p) + self._menu(p, query)
         if menu:
             parts.append("[connected] symbols in neighbouring files; pull with cortex_approve(ids) instead of reading "
                          "those files:\n" + "\n".join(menu))
         out = "\n".join(parts)
         self._log(op="read", path=p, file_tokens=full, shown_tokens=tokens(out), mode="outline", included=sum(inc),
                   symbols=len(syms), menu=len(menu), menu_tokens=tokens("\n".join(menu)) if menu else 0)
+        self.served += tokens(out)
         return pre + out
 
     def range(self, path, start, end, approve=()):
@@ -259,7 +357,9 @@ class Reader:
         self._request(p, a, b)
         self._remember(idents(out))
         self._touch(p, a, b)
+        self._need(p, a, b)
         self._log(op="range", path=p, file_tokens=tokens(text), shown_tokens=tokens(out), miss=miss, start=a, end=b)
+        self.served += tokens(out)
         return pre + out
 
     def approve(self, ids):
@@ -281,7 +381,9 @@ class Reader:
             self._request(p, a, b)
             self._remember(idents(body))
             self._touch(p, a, b)
+            self._need(p, a, b)
             self._log(op="approve", path=p, file_tokens=tokens(text), shown_tokens=tokens(body), id=mid)
+            self.served += tokens(body)
         return "\n".join(parts) + ("\n" if parts else "")
 
     def outline(self, path):

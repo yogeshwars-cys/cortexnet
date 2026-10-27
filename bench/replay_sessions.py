@@ -40,7 +40,11 @@ ARMS = {"outline only (no up-front includes)": dict(features=V1, menu=False, tau
         "v1 (query, changed, asked, structure)": dict(features=V1, menu=False),
         "+ trail": dict(features=V1 + ["trail"], menu=False),
         "+ trail + graph": dict(features=FEATURES, menu=False),
-        "+ trail + graph + menu": dict(features=FEATURES, menu=True)}
+        "+ trail + graph + menu": dict(features=FEATURES, menu=True),
+        "Rule A/B policy (prefix-cache cost), split 600": dict(menu=False, split_tokens=600, policy="rule_ab")}
+HEAD = os.environ.get("CORTEXNET_HEAD")      # an exported Cortex-SubNN head (bench/subnn_train.py --export)
+# compounding cost per token / per extra round trip at the session medians (H_rem 72, logged context ~43k)
+M_TOK, T_TRIP = 1 + 0.1 * 72, 0.1 * 43000 + 400
 
 
 def text_of(c):
@@ -188,11 +192,16 @@ def run_arm(sessions, arm, root):
                         st["menu_tok"] += ev.get("menu_tokens", 0)
             os.remove(r.log_path)
         shutil.rmtree(ws, ignore_errors=True)
-    st["model"] = Reader(state).model.w.round(2).tolist()
+    st["model"] = Reader(state).model.w.round(2).tolist()       # include model (the coprocessor is frozen)
     return st
 
 
 def main():
+    if HEAD:
+        from cortexnet.coproc import Coprocessor, MiniLM
+        cp = Coprocessor(HEAD, encoder=MiniLM())
+        ARMS["budget fill + coprocessor"] = dict(menu=False, split_tokens=600, coproc=cp)
+        ARMS["Rule A/B + coprocessor"] = dict(menu=False, split_tokens=600, policy="rule_ab", coproc=cp)
     sessions = load_sessions()
     root = tempfile.mkdtemp(dir=os.environ.get("TMP"))
     print(f"{len(sessions)} sessions with reads and edits", flush=True)
@@ -207,12 +216,18 @@ def main():
          "sessions. Tokens = chars/4. Baseline = tokens the real Read calls returned. Upper bound: the simulated agent "
          "fetches the right symbol after a miss and approves exactly the menu items it needs.", "",
          "| arm | read tokens vs baseline | edits with lines already shown | first half / second half of sessions | "
-         "misses served by menu | misses by range | menu items offered | menu tokens |", "|---|---|---|---|---|---|---|---|"]
+         "misses served by menu | misses by range | menu items offered | menu tokens | with prefix-cache compounding |",
+         "|---|---|---|---|---|---|---|---|---|"]
     for name, s in res.items():
+        comp = (M_TOK * s["cost"] + T_TRIP * (s["ranged"] + s["approved"])) / max(M_TOK * s["base"], 1)
         L.append(f"| {name} | {s['cost']:,} / {s['base']:,} ({s['cost'] / max(s['base'], 1):.0%}) | "
                  f"{s['hit'] / max(s['edits'], 1):.0%} of {s['edits']} | {np.mean(s['hit_first'] or [0]):.0%} / "
-                 f"{np.mean(s['hit_second'] or [0]):.0%} | {s['approved']} | {s['ranged']} | {s['menu_items']} | {s['menu_tok']:,} |")
+                 f"{np.mean(s['hit_second'] or [0]):.0%} | {s['approved']} | {s['ranged']} | {s['menu_items']} | {s['menu_tok']:,} | {comp:.0%} |")
     s = next(iter(res.values()))
+    L += ["", f"Compounding column: every token served costs {M_TOK:.1f}x (re-read from the prefix cache on the median "
+          f"72 later calls at 0.1x) and every extra round trip (menu approval or range after a miss) {T_TRIP:,.0f} "
+          "tokens (0.1 x the median 43k logged context + 400 tool overhead); medians, not per-event values. "
+          "Coprocessor arms pass the replay query (user prompt + agent's last words) as the prompt view.", ""]
     L += ["", f"Reads replayed: {s['reads']} full reads, {s['outline_reads']} served outline-first (the rest are small files "
           "returned whole).", "", "Learned weights after the last session (" + ", ".join(FEATURES) + "):", ""]
     L += [f"- {n}: {v['model']}" for n, v in res.items()]
