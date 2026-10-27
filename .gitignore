@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.cortexnet/
+data/
+*.jsonl
+.venv/

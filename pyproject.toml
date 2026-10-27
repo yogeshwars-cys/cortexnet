@@ -1,0 +1,16 @@
+[project]
+name = "cortexnet"
+version = "0.1.0"
+description = "Outline-first context for coding agents, with includes learned from the agent's own misses"
+requires-python = ">=3.10"
+dependencies = ["numpy"]
+
+[project.scripts]
+cortexnet-mcp = "cortexnet.mcp_server:main"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["cortexnet"]
