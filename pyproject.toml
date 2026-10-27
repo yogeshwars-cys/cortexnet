@@ -1,7 +1,7 @@
 [project]
 name = "cortexnet"
 version = "0.1.0"
-description = "Outline-first context for coding agents, with includes learned from the agent's own misses"
+description = "A learned coprocessor that decides what code goes into a coding agent's context: outline-first reads, includes learned from the agent's own misses"
 requires-python = ">=3.10"
 dependencies = ["numpy"]
 
