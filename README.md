@@ -12,10 +12,10 @@ that request is a miss, and the misses are what the coprocessor learns from.
 | Outline-first reader (outlines, ranges, sub-block splitting, miss accounting) | built, tested, measured on replay |
 | Include model v1: online logistic over symbol features, trained on misses | built, measured on replay |
 | Delivery to agents over MCP (`cortex_read`, `cortex_range`, `cortex_outline`) | built, in daily use |
-| **Cortex-SubNN coprocessor** (below) | designed, not built yet |
-| Live A/B on a strong open model (Meta Muse Glimmer 30B): tokens and task success | harness built, not run yet |
-
-The numbers below come from the reader and the v1 include model. The coprocessor has no numbers yet.
+| **Cortex-SubNN coprocessor** (below) | built, cross-validated on 854 logged reads |
+| 64-byte symbol codes (`cortexnet/codec.py`) | built, no measurable ranking loss |
+| Live A/B, Meta Muse Spark 1.3 (Meta Model API) as the agent | run, 14 tasks |
+| Live A/B, Meta Muse Glimmer 30B (self-hosted) as the agent, on SWE-bench Lite | run, 18 paired tasks so far (40 in progress) |
 
 ## Why
 
@@ -33,30 +33,64 @@ edit 12%). Replaying 62 whole sessions in order (small files whole, partial read
 62% of the read tokens, 56% with big symbols split into sub-blocks. Both are upper bounds: they assume the right
 symbol gets picked. Picking it is the coprocessor's job, and the live A/B is the real test.
 
+## Results
+
+**Glimmer 30B as the agent** (`bench/swe_agent.py`, `bench/modal_glimmer.py::ab`, report `bench/results/swe_ab.md`).
+SWE-bench Lite, one H100 per arm, the same tasks with whole-file reads, with CortexNET, and with CortexNET plus fading
+(a read drops to its outline once the agent moves on). Paired over the 18 tasks every arm has finished so far:
+
+| | whole file | CortexNET | CortexNET + fade |
+|---|---|---|---|
+| prefill tokens (the model re-reads its context every turn) | 184k | 0.58x [0.44, 0.82] | 0.52x [0.40, 0.71] |
+| peak context | 18.3k | 0.49x | 0.45x |
+| peak KV cache (Glimmer's layout: 13 full-attention layers grow, 39 sliding-window layers cap at 2k) | 310 MB | 0.61x | 0.59x |
+| file tokens put into context | 262k | 35% | 34% |
+| turns | 17 | 1.19x | 1.09x |
+| submitted the gold file / gold symbol | 94% / 56% | 89% / 56% | 89% / 56% |
+
+One whole-file episode ran the 80 GB GPU out of memory. Whole-file reads also show what the agent used: from the
+attention of a full-attention layer, 80% of the attention on code bodies lands on 56% of the code shown, and ranking
+symbols by that attention finds the needed ones at MRR 0.81 (random 0.20). That gives labels for reads the agent never
+comes back to.
+
+**Muse Spark 1.3 as the agent** (Meta Model API, `bench/live_ab.py --meta`, 14 code questions): both arms 14/14
+correct; CortexNET used 52% of the input tokens and 43% of the cost. The gain is all on large files.
+
+**Coprocessor ranking** (854 read-time decisions from 91 logged sessions, 5-fold cross-validation grouped by session,
+`bench/subnn_train.py`): MRR 0.416 for the full model vs 0.348 for frozen MiniLM zero-shot (+0.068, 95% CI
+[+0.047, +0.090]), 0.309 for the v1 include model and 0.280 for random order. With symbol vectors stored as 64-byte
+codes: 0.414.
+
+**Where it pays:** the cost-aware decision rule saves most for agents with small or expensive contexts, such as a
+self-hosted model where every context token costs KV memory and prefill. At the context sizes of a hosted agent like
+Claude Code it falls back to whole files about 92% of the time.
+
 ## The coprocessor: Cortex-SubNN
 
 The v1 include model only sees features of the file. The coprocessor also sees what the LLM is about to do:
 
-1. **Snapshot.** Before each tool call, take the model's latest reasoning plus the tool arguments and the last symbol
-   it looked at.
-2. **Bottleneck.** A two-layer int8 MLP compresses that into a short intent vector (k = 32). The same network embeds
-   every symbol in the workspace. Trained contrastively (InfoNCE plus L1 sparsity) on which symbol the agent needed
-   next, counting reads for reference as well as edits.
-3. **Round-trip scoring.** A symbol is scored by walking from the intent to the symbol and back. Generic helpers that
-   connect to everything leak probability and score low, which fixes the failure of the plain symbol graph (AUC 0.50,
-   below).
-4. **Cost gate.** A body is included only if the expected saved round trip outweighs its token cost and the score clears
-   a floor. Otherwise the agent gets the outline alone.
-
-Open question: whether the coprocessor reads the model's reasoning text or its hidden states. Text keeps it model
-agnostic and cheap; hidden states need the host model on a GPU but give a richer signal.
+1. **Views.** The task prompt, the model's latest reasoning before the read, and the trail of symbols it looked at
+   last, fused by a learned gate (when there is no reasoning, the gate moves weight to the prompt and trail).
+2. **Late interaction.** Each symbol is split into up to 4 sub-spans; a symbol's score is its best sub-span match,
+   through a low-rank bilinear head on a frozen MiniLM encoder, with an int8 bottleneck.
+3. **Training.** Cost-weighted contrastive loss on which symbol the agent needed next (edits, line-range requests,
+   `sed -n`, git history), hard negatives from the same file.
+4. **Decision.** Calibrated probabilities pick the up-front bodies, or the whole file when that is cheaper in
+   expectation (`cortexnet/policy.py`). Otherwise the agent gets the outline alone.
 
 ## What did not help
 
-Measured, see `bench/results/`: a decayed session trail of identifiers and a cross-file symbol graph (calls,
-called-by, body overlap) add no held-out gain to the v1 include model; the graph feature alone is at chance (AUC 0.50).
-A menu of connected symbols in neighbouring files was offered 25 times in the replay and never needed, so it is off by
-default (`Reader(menu=True)` to try it).
+Measured, see `bench/results/`:
+
+- A decayed session trail of identifiers and a cross-file symbol graph add no held-out gain to the v1 include model;
+  the graph feature alone is at chance (AUC 0.50). A menu of connected symbols in neighbouring files was offered 25
+  times in the replay and never needed, so it is off by default (`Reader(menu=True)` to try it).
+- Glimmer 30B as the frozen text encoder instead of MiniLM: ties it (0.396 vs 0.416) at ~1,000x the size.
+- Switching between the two encoders online (Hedge) or stacking them with a per-read gate: +0.012 to +0.014 MRR,
+  not significant (`subnn_hedge.md`, `subnn_fuse.md`).
+- Glimmer's raw hidden state at the read decision as the query, on 55 live cases: 0.49-0.53 vs 0.73 for MiniLM on the
+  text (a 6,656-d projection overfits). Reading it through Glimmer's own vocabulary (logit lens) is above chance but
+  weak so far (0.38 vs 0.32 random, 18 reads).
 
 ## Use
 
@@ -77,6 +111,10 @@ log) goes to `$CORTEXNET_STATE` or `./.cortexnet/`.
 | `cortexnet/learn.py` | v1 include model: online logistic over symbol features, labels from the agent's range requests |
 | `cortexnet/reader.py` | outline-first reads, ranges, miss accounting, event log |
 | `cortexnet/mcp_server.py` | minimal MCP server (JSON-RPC over stdio) |
+| `cortexnet/coproc.py`, `cortexnet/codec.py`, `cortexnet/policy.py` | coprocessor runtime, 64-byte bit-plane symbol codes, cost-aware include rule |
+| `bench/subnn_data.py`, `bench/subnn_train.py` | symbol-level cases from session logs and git history; coprocessor training and cross-validation |
+| `bench/swe_agent.py`, `bench/modal_glimmer.py`, `bench/swe_ab_report.py` | Glimmer 30B as a coding agent on SWE-bench Lite (Modal), A/B arms, attention and logit-lens probes, report |
+| `bench/subnn_hedge.py`, `bench/subnn_fuse.py` | encoder switching and stacking studies |
 | `bench/replay_edits.py`, `bench/replay_sessions.py` | offline replay over local session logs (aggregates only) |
 | `bench/*_signal.py`, `bench/*_snapshot.py`, `bench/commit_symbols.py` | feature and label studies |
 | `bench/live_ab.py` | live A/B: same agent and tasks, whole-file reads vs CortexNET; local transformers or any OpenAI-compatible server |
