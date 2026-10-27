@@ -48,7 +48,9 @@ SWE-bench Lite, one H100 per arm, the same tasks with whole-file reads, with Cor
 | turns | 17 | 1.19x | 1.09x |
 | submitted the gold file / gold symbol | 94% / 56% | 89% / 56% | 89% / 56% |
 
-One whole-file episode ran the 80 GB GPU out of memory. Whole-file reads also show what the agent used: from the
+One whole-file episode ran the 80 GB GPU out of memory; the same task fit on a rerun, and both CortexNET arms solved
+it, fade at 0.43x the prefill and 0.54x the peak KV (`bench/results/swe_incident_xarray_4094.md`). Whole-file reads
+also show what the agent used: from the
 attention of a full-attention layer, 80% of the attention on code bodies lands on 56% of the code shown, and ranking
 symbols by that attention finds the needed ones at MRR 0.81 (random 0.20). That gives labels for reads the agent never
 comes back to.
