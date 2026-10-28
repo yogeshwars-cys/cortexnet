@@ -7,6 +7,7 @@ dependencies = ["numpy"]
 
 [project.scripts]
 cortexnet-mcp = "cortexnet.mcp_server:main"
+cortexnet-proxy = "cortexnet.proxy:main"
 
 [build-system]
 requires = ["setuptools>=61"]

@@ -14,9 +14,12 @@ Session state the scores use:
 Every call is appended to <state_dir>/events.jsonl.
 
 Optional (all off by default):
-  coproc   a cortexnet.coproc.Coprocessor: its calibrated probabilities replace the include model's for leaf
-           symbols (semantic context from the prompt, the reasoning snapshot or a live hidden state, and the
-           symbols the session touched last); the include model keeps learning from the same events.
+  coproc   a cortexnet.coproc.Coprocessor: adds semantic context (the prompt, the reasoning snapshot or a live hidden
+           state, and the symbols the session touched last) on top of the include model. A leaf symbol's probability
+           is 1 - (1 - p_include)(1 - p_coproc): either can bring a body up front, and the coprocessor never takes
+           away a body the include model would show. The include model keeps learning from the same events.
+           On top of that the coprocessor's own top `coproc_top` symbols (default 1) go up front when each is at most
+           `coproc_max` tokens (default 400), by rank, since its honest probabilities rarely clear a threshold.
   policy   "rule_ab": choose the up-front set (or the whole file) by Rule A/B under the prefix-cache cost
            (cortexnet/policy.py) instead of filling a fixed budget.
   graph    a cortexnet.graph.CoNeedGraph over the coprocessor's code cells: ranged/approved symbols are co-needs,
@@ -25,12 +28,13 @@ Optional (all off by default):
 import difflib
 import json
 import os
+import re
 import time
 
 import numpy as np
 
 from .learn import FEATURES, IncludeModel, featurize, idents
-from .outline import outline, symbols, tokens
+from .outline import outline, skeleton, symbols, tokens
 from .policy import H_REM_PRIOR, effective_turn, rule_ab
 
 DECAY = 0.7
@@ -45,8 +49,12 @@ def numbered(lines, a, b):
 class Reader:
     def __init__(self, state_dir=None, full_below=800, budget_frac=0.25, budget_min=400, tau=0.5, horizon=10,
                  features=None, menu=False, menu_size=3, tau_menu=0.35, neighbours=40, split_tokens=0,
-                 coproc=None, policy="budget", ctx_base=20000, h_rem=H_REM_PRIOR, graph=None):
+                 coproc=None, policy="budget", ctx_base=20000, h_rem=H_REM_PRIOR, graph=None, coproc_top=1,
+                 coproc_max=400, xray_top=0, xray_lines=12, xray_budget=400, mmr_beta=0.0):
         self.coproc, self.policy, self.ctx_base, self.h_rem, self.graph = coproc, policy, ctx_base, h_rem, graph
+        self.coproc_top, self.coproc_max = coproc_top, coproc_max
+        self.xray_top, self.xray_lines, self.xray_budget = xray_top, xray_lines, xray_budget
+        self.mmr_beta = mmr_beta              # > 0: the coprocessor's picks avoid near-duplicates of each other
         self.served, self.text_of, self.cell_of = 0, {}, {}      # tokens returned; trail texts; symbol -> cell
         self.state_dir = state_dir or os.path.join(os.getcwd(), ".cortexnet")
         os.makedirs(self.state_dir, exist_ok=True)
@@ -280,6 +288,65 @@ class Reader:
                     self.graph.add_symbol(cell, (p, s.start, s.end), s.name)
         return leaf, pc
 
+    def _mmr(self, p, lines, syms, leaf, pc, order, top=10):
+        """Redundancy-aware re-ordering of the coprocessor's top `top` symbols (maximal marginal relevance): the next
+        pick maximises p / p_max - mmr_beta * (highest cosine to the symbols already picked), on the coprocessor's
+        own mean-pooled sub-span vectors (from its cache, no new encoding). The rest keep their order."""
+        head = order[:top]
+        pos = {k: i for i, k in enumerate(leaf)}
+        E = self.coproc.symbol_vectors(p, lines, [syms[k] for k in head])          # [n, M, d], cached
+        V = E.sum(1)
+        V = V / np.maximum(np.linalg.norm(V, axis=1, keepdims=True), 1e-12)
+        rel = np.array([pc[pos[k]] for k in head], float)
+        rel = rel / max(rel.max(), 1e-12)
+        picked, left = [], list(range(len(head)))
+        while left:
+            sim = (V[left] @ V[picked].T).max(1) if picked else np.zeros(len(left))
+            j = left[int(np.argmax(rel[left] - self.mmr_beta * sim))]
+            picked.append(j)
+            left.remove(j)
+        return [head[j] for j in picked] + order[top:]
+
+    def _xray(self, syms, lines, inc, taken, query, order, st):
+        """X-ray tier: skeletons (signature, lines with the query's rare words, control-flow spine) of symbols that are
+        not shown in full: the top `xray_top` of the ranking, then any symbol holding a rare query word. Rare: in at
+        most max(3, 2% of) the file's lines. Stops at `xray_budget` tokens."""
+        qw = {w for w in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", query)}
+        cnt = {w: 0 for w in qw}
+        for l in lines:
+            for w in qw & set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", l)):
+                cnt[w] += 1
+        rare = {w for w, c in cnt.items() if 0 < c <= max(3, 0.02 * len(lines))}
+        hits = sorted((k for k, s in enumerate(syms) if not s.children and rare & set(
+            re.findall(r"[A-Za-z_][A-Za-z0-9_]*", "\n".join(lines[s.start - 1:s.end])))),
+            key=lambda k: min(cnt[w] for w in rare & set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*",
+                                                                   "\n".join(lines[syms[k].start - 1:syms[k].end])))))
+        out, used, seen = [], 0, set()
+        for k in list(order[:self.xray_top]) + hits:
+            s = syms[k]
+            if k in seen or inc[k] or any(a <= s.start and s.end <= b for a, b in taken):
+                continue
+            seen.add(k)
+            keep = [ln for ln in skeleton(s, lines, rare, self.xray_lines) if ln not in st["shown"]]
+            if not keep:
+                continue
+            runs, run = [], [keep[0]]
+            for ln in keep[1:]:
+                if ln == run[-1] + 1:
+                    run.append(ln)
+                else:
+                    runs.append(run)
+                    run = [ln]
+            runs.append(run)
+            text = f"--- x-ray of {s.name} (lines {s.start}-{s.end}; read_lines for the rest) ---\n" + \
+                "\n      ...\n".join(numbered(lines, r[0], r[-1]) for r in runs)
+            if used + tokens(text) > self.xray_budget:
+                break
+            out.append(text)
+            used += tokens(text)
+            st["shown"].update(keep)
+        return out
+
     def read(self, path, query="", approve=(), snapshot="", qvec=None):
         """snapshot: the agent's current reasoning; qvec: a live hidden-state query vector (coprocessor only)."""
         pre = self.approve(approve) if approve else ""
@@ -295,10 +362,14 @@ class Reader:
         syms = self._symbols(text, p)
         X, _ = self._features(p, syms, lines, query, changed)
         P = self.model.prob(X)
+        cop_order = []
         if self.coproc is not None:
             leaf, pc = self._semantic(p, lines, syms, X, query, snapshot, qvec)
             P = np.array(P, float)
-            P[leaf] = pc
+            P[leaf] = 1 - (1 - P[leaf]) * (1 - np.asarray(pc, float))   # additive: either one can include a body
+            cop_order = [leaf[i] for i in np.argsort(-np.asarray(pc, float), kind="stable")]
+            if self.mmr_beta > 0:
+                cop_order = self._mmr(p, lines, syms, leaf, pc, cop_order)
         head = outline(text, p, syms)
         inc, taken = [False] * len(syms), []
         if self.policy == "rule_ab":
@@ -322,6 +393,15 @@ class Reader:
                     continue
                 inc[k], used = True, used + cost
                 taken.append((s.start, s.end))
+        # the coprocessor's own pick: its top-ranked symbols go up front when small, whatever the thresholds say (its
+        # calibrated probabilities are honest but low, ~1-2 needed of 100+ symbols, so a threshold never lets it act)
+        for k in cop_order[:self.coproc_top]:
+            s = syms[k]
+            if inc[k] or any(not (s.end < a or s.start > b) for a, b in taken):
+                continue
+            if tokens("\n".join(lines[s.start - 1:s.end])) <= self.coproc_max:
+                inc[k] = True
+                taken.append((s.start, s.end))
         parts = [head]
         st = self._state(p, lines, syms)
         st["shown"] = set()
@@ -330,6 +410,9 @@ class Reader:
             st["shown"].update(range(a, b + 1))
             self._remember(idents("\n".join(lines[a - 1:b])), 0.5)
             self._touch(p, a, b, 0.5)
+        if self.xray_top:
+            parts += self._xray(syms, lines, inc, taken, query, cop_order or
+                                sorted((k for k, s in enumerate(syms) if not s.children), key=lambda k: -P[k]), st)
         self.events.append(dict(path=p, call=self.calls, X=X, spans=[(s.start, s.end) for s in syms], included=inc,
                                 requests=[]))
         menu = self._graph_menu(p) + self._menu(p, query)

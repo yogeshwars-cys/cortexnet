@@ -172,5 +172,19 @@ class GraphMenuTest(unittest.TestCase):
             self.assertEqual(r._menu(os.path.abspath(a), ""), [])
 
 
+class OptionsTest(unittest.TestCase):
+    def test_env_switches_map_to_reader_options(self):
+        from cortexnet.mcp_server import options
+        with tempfile.TemporaryDirectory() as d:
+            kw = options({"CORTEXNET_MENU": "1", "CORTEXNET_GRAPH": "1", "CORTEXNET_STATE": d})
+            self.assertTrue(kw["menu"])
+            self.assertIsNotNone(kw["graph"])
+            r = Reader(d, **kw)                              # the full system's switches build a working reader
+            self.assertTrue(r.menu_on)
+        self.assertNotIn("menu", options({}))                # off by default
+        kw = options({"CORTEXNET_COPROC": os.path.join(tempfile.gettempdir(), "no-such-head.npz")})
+        self.assertNotIn("coproc", kw)                       # a missing head turns the coprocessor off, no crash
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,0 +1,108 @@
+[
+ {
+  "arm": "whole",
+  "episodes": [
+   {
+    "instance_id": "astropy__astropy-12907",
+    "arm": "whole",
+    "start": 1156,
+    "peak": 29308,
+    "prefill": 184618,
+    "gen": 2505,
+    "gen_secs": 281.2,
+    "turns": 12,
+    "calls": 6,
+    "reads": 2,
+    "ranges": 2,
+    "tool_tok": {
+     "grep": 534,
+     "read_file": 24219,
+     "read_lines": 854,
+     "submit": 18
+    },
+    "faded": 0,
+    "hit_limit": false,
+    "submitted": true,
+    "kv_bytes": 53248,
+    "peak_kv_mb": 450.1,
+    "kv_mb_turns": 3194.0,
+    "file_ok": true,
+    "symbol_ok": false,
+    "secs": 287
+   }
+  ],
+  "spent": 0.35,
+  "gen_tok_s": 8.9
+ },
+ {
+  "arm": "cortex",
+  "episodes": [
+   {
+    "instance_id": "astropy__astropy-12907",
+    "arm": "cortex",
+    "start": 1189,
+    "peak": 6201,
+    "prefill": 53149,
+    "gen": 1744,
+    "gen_secs": 143.8,
+    "turns": 16,
+    "calls": 8,
+    "reads": 1,
+    "ranges": 5,
+    "tool_tok": {
+     "grep": 534,
+     "read_file": 298,
+     "read_lines": 2388,
+     "submit": 18
+    },
+    "faded": 0,
+    "hit_limit": false,
+    "submitted": true,
+    "kv_bytes": 53248,
+    "peak_kv_mb": 156.7,
+    "kv_mb_turns": 1842.0,
+    "file_ok": true,
+    "symbol_ok": true,
+    "secs": 149
+   }
+  ],
+  "spent": 0.26,
+  "gen_tok_s": 12.1
+ },
+ {
+  "arm": "fade",
+  "episodes": [
+   {
+    "instance_id": "astropy__astropy-12907",
+    "arm": "fade",
+    "start": 1189,
+    "peak": 7335,
+    "prefill": 62071,
+    "gen": 2652,
+    "gen_secs": 308.6,
+    "turns": 18,
+    "calls": 9,
+    "reads": 1,
+    "ranges": 5,
+    "tool_tok": {
+     "list_dir": 131,
+     "grep": 534,
+     "read_file": 298,
+     "read_lines": 2479,
+     "submit": 18
+    },
+    "faded": 0,
+    "hit_limit": false,
+    "submitted": true,
+    "kv_bytes": 53248,
+    "peak_kv_mb": 171.1,
+    "kv_mb_turns": 2077.1,
+    "file_ok": true,
+    "symbol_ok": true,
+    "secs": 323
+   }
+  ],
+  "spent": 0.47,
+  "gen_tok_s": 8.6
+ }
+]

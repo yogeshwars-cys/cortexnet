@@ -5,3 +5,5 @@ data/
 *.jsonl
 .venv/
 *.rr.npz
+bench/results/traces/
+.serena/

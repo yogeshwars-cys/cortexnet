@@ -44,6 +44,15 @@ def trail_text(names, body):
     return " ".join(names) + "\n" + body[:800]
 
 
+def calib_features(s):
+    """Per symbol of one read: [s - max s, max s, log n]. The first sets the order inside the read; the other two
+    let the level move with how well the best symbol matches and with file size (the base rate falls with n)."""
+    s = np.asarray(s, float)
+    if not len(s):
+        return np.zeros((0, 3))
+    return np.stack([s - s.max(), np.full_like(s, s.max()), np.full_like(s, math.log(len(s)))], 1)
+
+
 class MiniLM:
     """MiniLM mean-pool + L2 norm (same as sentence-transformers), frozen. Needs torch + transformers."""
 
@@ -77,7 +86,14 @@ class Coprocessor:
         self.g, self.dg, self.A, self.B = d["g"], d["dg"], d["A"], d["B"]
         self.Wg_w, self.Wg_b, self.ws_w, self.ws_b = d["Wg_w"], d["Wg_b"], d["ws_w"], float(d["ws_b"][0])
         self.phi_mu, self.phi_sd = d["phi_mu"], d["phi_sd"]
-        self.pa, self.pb = (float(x) for x in d["platt"])
+        # calib = (w_rel, w_max, w_logn, b) over calib_features. Heads exported before 2026-10-28 carry only a raw
+        # pooled Platt (a, b), which came out with a < 0 and reversed every read's order: refuse them.
+        if "calib" not in d:
+            raise ValueError(f"{path}: no calib (old raw-score Platt {tuple(d['platt']) if 'platt' in d else None}); "
+                             "re-export with bench/subnn_train.py --export")
+        self.calib = np.asarray(d["calib"], float)
+        if self.calib[0] <= 0:
+            raise ValueError(f"{path}: calibration weight on s - max s is {self.calib[0]:.3f} <= 0")
         self.multi, self.gate, self.late, self.struct, self.diag, self.lowrank = (bool(x) for x in d["flags"])
         self.gamma = float(d["gamma"])
         self.encoder_name = str(d["encoder"])
@@ -173,4 +189,4 @@ class Coprocessor:
 
     def prob(self, path, lines, syms, phi, prompt="", snapshot="", trail=(), qvec=None):
         s = self.scores(self.views(prompt, snapshot, trail, qvec), self.symbol_vectors(path, lines, syms), phi)
-        return 1 / (1 + np.exp(-(self.pa * s + self.pb)))
+        return 1 / (1 + np.exp(-(calib_features(s) @ self.calib[:3] + self.calib[3])))

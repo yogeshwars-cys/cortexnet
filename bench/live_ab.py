@@ -32,7 +32,8 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from cortexnet import Reader, tokens  # noqa: E402
+from cortexnet import Reader, outline, symbols, tokens  # noqa: E402
+from cortexnet.fade import watermark_fade  # noqa: E402
 from cortexnet.reader import numbered  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -97,6 +98,9 @@ class Ledger:
 SYSTEM = ("You answer questions about the code in this workspace. Always look the answer up with the tools before "
           "answering; never answer from memory. Paths are relative to the workspace root. Files:\n{files}\n"
           "When you know the answer, reply with one short sentence that starts with 'ANSWER:'.")
+# --hint (for small local models): one concrete call shape; graph.py is in no task, so it gives nothing away
+HINT = ('\nUse a path exactly as listed above, e.g. read_file with path "cortexnet/graph.py". If a tool returns an '
+        "error, fix the call and try again; do not answer from an error message.")
 
 
 def fixture():
@@ -118,28 +122,71 @@ def tool_specs(arm):
     s = {"type": "string"}
     grep = fn("grep", "Search files for a regular expression; returns path:line: text for each match (max 40).",
               {"pattern": s, "path": {"type": "string", "description": "file or directory, relative"}}, ["pattern"])
-    if arm == "baseline":
+    if base_arm(arm) == "baseline":
         return [fn("read_file", "Return the whole file with line numbers.", {"path": s}, ["path"]), grep]
     # same tool name as the baseline, so the A/B measures what the tool returns, not how it is named
     return [fn("read_file", "Read a file. Small files come back whole with line numbers; large files come back as an "
                "outline (each function/class with its line range) plus the parts most likely relevant to `query`. "
                "Use read_lines to see any other lines.", {"path": s, "query": s}, ["path"]),
             fn("read_lines", "Return lines start..end of a file with line numbers.",
-               {"path": s, "start": {"type": "integer"}, "end": {"type": "integer"}}, ["path", "start", "end"]), grep]
+               {"path": s, "start": {"type": "integer"}, "end": {"type": "integer"}}, ["path", "start", "end"]), grep] \
+        + ([fn("cortex_approve", "Pull the bodies of connected symbols offered in a [connected] menu, by id "
+               "(e.g. [\"#3\"]).", {"ids": {"type": "array", "items": s}}, ["ids"])]
+           if (ARMS[base_arm(arm)] or {}).get("menu") else [])
+
+
+# Reader settings per arm (split 600 = the MCP server's default). "coproc" arms need --coproc <exported head>.
+# "full" = every CortexNET part: coprocessor (additive + rank pick), symbol graph, connected-symbol menu (with the
+# cortex_approve tool), on top of outline-first reads, sub-block splits and the trail.
+# Any arm + "+fade" (e.g. cortex+fade) also fades stale reads to outlines in one batch near the context limit.
+ARMS = {"baseline": None, "cortex": {}, "coproc": dict(coproc=True), "coproc_ab": dict(coproc=True, policy="rule_ab"),
+        "full": dict(coproc=True, menu=True, graph=True)}
+
+
+def base_arm(arm):
+    return arm.split("+")[0]
 
 
 class Tools:
-    def __init__(self, root, arm, state):
-        self.root, self.arm = root, arm
-        self.reader = Reader(state, split_tokens=600) if arm == "cortex" else None   # the MCP server's default
+    """task: the user's question; every cortex arm reads with query = task + the call's own query and the agent's
+    words of this turn as the snapshot, the same views the proxy (aware mode) and the coprocessor's training use."""
+
+    def __init__(self, root, arm, state, coproc=None, task="", ctx_base=2000):
+        self.root, self.arm, self.task = root, arm, task
+        cfg = ARMS[base_arm(arm)]
+        kw = dict(cfg or {})
+        if kw.pop("coproc", False):
+            if coproc is None:
+                raise SystemExit(f"arm {arm} needs --coproc <head.npz>")
+            kw.update(coproc=coproc, ctx_base=ctx_base)
+        if kw.pop("graph", False):
+            from cortexnet.graph import CoNeedGraph
+            kw["graph"] = CoNeedGraph()
+        self.reader = None if cfg is None else Reader(state, split_tokens=600, **kw)
+
+    def outline(self, path):
+        """The file's outline (what a faded read leaves behind), or None if the path does not resolve."""
+        try:
+            p = self._p(path)
+            with open(p, encoding="utf8", errors="replace") as fh:
+                text = fh.read()
+        except (OSError, ValueError):
+            return None
+        return outline(text, p, symbols(text, p, split_tokens=600))
 
     def _p(self, path):
         p = os.path.normpath(os.path.join(self.root, (path or ".").lstrip("/\\")))
         if not p.startswith(os.path.normpath(self.root)):
             raise ValueError("path outside the workspace")
+        if not os.path.exists(p):      # "reader.py" for cortexnet/reader.py: take the one listed file it ends with
+            want = "/" + (path or "").replace("\\", "/").lstrip("/")
+            hits = [os.path.join(dp, f) for dp, _, fs in os.walk(self.root) if ".state" not in dp for f in fs
+                    if ("/" + os.path.relpath(os.path.join(dp, f), self.root).replace("\\", "/")).endswith(want)]
+            if len(hits) == 1:
+                return hits[0]
         return p
 
-    def call(self, name, a):
+    def call(self, name, a, snapshot=""):
         try:
             if name == "grep":
                 rx = re.compile(a["pattern"])
@@ -154,11 +201,15 @@ class Tools:
                                 out.append(f"{os.path.relpath(f, self.root)}:{i}: {l.rstrip()[:200]}")
                 return "\n".join(out[:40]) or "no matches"
             if name == "read_file" and self.reader:
-                return self.reader.read(self._p(a["path"]), a.get("query", ""))
+                return self.reader.read(self._p(a["path"]), (self.task + "\n" + (a.get("query") or "")).strip(),
+                                        snapshot=snapshot)
             if name == "read_file":
                 with open(self._p(a["path"]), encoding="utf8", errors="replace") as fh:
                     lines = fh.read().split("\n")
                 return numbered(lines, 1, len(lines))
+            if name == "cortex_approve" and self.reader is not None and self.reader.menu_on:
+                ids = a.get("ids") or []
+                return self.reader.approve([ids] if isinstance(ids, str) else list(ids))
             if name == "read_lines" and self.reader:
                 return self.reader.range(self._p(a["path"]), a["start"], a["end"])
             return f"unknown tool {name}"
@@ -259,7 +310,10 @@ def post(url, body, key=None, tries=4):
             return json.loads(urllib.request.urlopen(req, timeout=600).read())
         except urllib.error.HTTPError as e:
             msg = e.read().decode(errors="replace")[:500]
-            if e.code not in (429, 500, 502, 503, 504) or i == tries - 1:
+            # llama-server's 500 for a tool call it cannot parse is the model's output at temperature 0: a retry
+            # returns the same thing, so fail at once
+            unparsed = e.code == 500 and "expected" in msg and "format" in msg
+            if e.code not in (429, 500, 502, 503, 504) or unparsed or i == tries - 1:
                 raise RuntimeError(f"HTTP {e.code}: {msg}") from None
         except (urllib.error.URLError, TimeoutError):
             if i == tries - 1:
@@ -279,10 +333,17 @@ class OpenAIBackend:
         r = post(self.base + "/chat/completions",
                  {"model": self.name, "messages": msgs, "tools": tools, "temperature": 0}, self.key)
         msg = r["choices"][0]["message"]
-        calls = [{"id": c["id"], "name": c["function"]["name"], "arguments": json.loads(c["function"]["arguments"] or "{}")}
-                 for c in msg.get("tool_calls") or []]
+        calls = []
+        for c in msg.get("tool_calls") or []:
+            try:
+                args = json.loads(c["function"]["arguments"] or "{}")
+            except ValueError:     # small local models sometimes emit broken JSON; the tool reports the missing args
+                args = {}
+            calls.append({"id": c.get("id"), "name": c["function"]["name"], "arguments": args})
         u = r.get("usage", {})
-        self.last = dict(usage=u)
+        # llama-server adds timings: prompt_n (tokens actually prefilled, after its prefix cache), prompt_ms,
+        # predicted_n, predicted_ms
+        self.last = dict(usage=u, timings=r.get("timings") or {})
         return msg.get("content") or "", calls, u.get("prompt_tokens", 0)
 
 
@@ -367,23 +428,61 @@ class MetaBackend:
         return "\n".join(text), calls, u.get("input_tokens", 0)
 
 
-def run_task(backend, root, arm, q, state, max_calls=8, trace=None):
-    tools = Tools(root, arm, state)
+def msg_tokens(msgs):
+    return sum(tokens(str(m.get("content") or "")) + sum(tokens(c["function"]["arguments"]) + 8
+                                                         for c in m.get("tool_calls") or []) for m in msgs)
+
+
+def run_task(backend, root, arm, q, state, max_calls=8, trace=None, count_errors=False, hint=False, coproc=None,
+             session=None, fade=None):
+    """One question through the tool loop. With count_errors, a server error (e.g. the context overflowed) ends the
+    task as a failure of this arm, recorded in st["error"], instead of raising.
+    session: a dict kept across questions (one conversation per arm: its messages and tools); None = fresh per task.
+    fade: dict(limit, mark, keep) for "+fade" arms; the token estimate is scaled by the server's own prompt counts."""
     specs = tool_specs(arm)
     files = sorted(os.path.relpath(os.path.join(dp, f), root).replace("\\", "/") for dp, _, fs in os.walk(root)
                    for f in fs if f.endswith(".py") and ".state" not in dp)
-    msgs = [{"role": "system", "content": SYSTEM.format(files="\n".join(files))}, {"role": "user", "content": q}]
+    system = SYSTEM.format(files="\n".join(files)) + (HINT if hint else "")
+    sess = session if session is not None else {}
+    if "msgs" not in sess:
+        sess["msgs"] = [{"role": "system", "content": system}]
+        sess["tools"] = Tools(root, arm, state, coproc, task=q, ctx_base=tokens(system) + tokens(q))
+        sess["ratio"] = 1.0
+    msgs, tools = sess["msgs"], sess["tools"]
+    tools.task = q
+    msgs.append({"role": "user", "content": q})
     st = dict(input_tokens=0, cached_tokens=0, output_tokens=0, reasoning_tokens=0, usd=0.0, tool_tokens=0, calls=0,
-              answer="")
+              answer="", prefill_tokens=0, prefill_ms=0.0, gen_ms=0.0, peak_context=0, seconds=0.0, error="",
+              fades=0, context_end=0)
+    t0 = time.time()
     for turn in range(max_calls + 1):
-        content, calls, n_in = backend.chat(msgs, specs)
+        if fade:
+            st["fades"] += watermark_fade(msgs, sess["ratio"] * msg_tokens(msgs), fade["limit"], tools.outline,
+                                          mark=fade["mark"], low=fade["low"], keep=fade["keep"],
+                                          keep_frac=fade["keep_frac"], scale=sess["ratio"])
+        sent = msg_tokens(msgs)
+        try:
+            content, calls, n_in = backend.chat(msgs, specs)
+        except RuntimeError as e:
+            if not count_errors or re.match(r"HTTP 40[13]\b", str(e)):   # auth problems abort the run
+                raise
+            st["error"] = f"{str(e)[:240]} (rejected request ~{int(sess['ratio'] * sent):,} tokens)"
+            break
+        if n_in:
+            sess["ratio"] = n_in / max(sent, 1)       # server tokens per estimated token (tokenizer + template)
         last = getattr(backend, "last", {})
         u = last.get("usage") or {}
+        out_n = u.get("output_tokens", u.get("completion_tokens", 0))
         st["input_tokens"] += n_in
         st["cached_tokens"] += (u.get("input_tokens_details") or {}).get("cached_tokens", 0)
-        st["output_tokens"] += u.get("output_tokens", 0)
+        st["output_tokens"] += out_n
         st["reasoning_tokens"] += (u.get("output_tokens_details") or {}).get("reasoning_tokens", 0)
         st["usd"] += last.get("usd", 0.0)
+        tm = last.get("timings") or {}
+        st["prefill_tokens"] += tm.get("prompt_n", 0)
+        st["prefill_ms"] += tm.get("prompt_ms", 0.0)
+        st["gen_ms"] += tm.get("predicted_ms", 0.0)
+        st["peak_context"] = max(st["peak_context"], n_in + out_n)
         for j, c in enumerate(calls):
             c.setdefault("id", f"call_{turn}_{j}")
         if not calls or st["calls"] >= max_calls:
@@ -392,8 +491,9 @@ def run_task(backend, root, arm, q, state, max_calls=8, trace=None):
             msgs.append({"role": "assistant", "content": content, "_resp_id": last.get("resp_id"), "tool_calls": [
                 {"id": c["id"], "type": "function",
                  "function": {"name": c["name"], "arguments": json.dumps(c.get("arguments") or {})}} for c in calls]})
+            snap = "\n".join([content or ""] + list(last.get("reasoning") or [])).strip()
             for c in calls:
-                out = tools.call(c["name"], c.get("arguments") or {})
+                out = tools.call(c["name"], c.get("arguments") or {}, snapshot=snap)
                 st["calls"] += 1
                 st["tool_tokens"] += tokens(out)
                 c["output_tokens"] = tokens(out)
@@ -403,6 +503,10 @@ def run_task(backend, root, arm, q, state, max_calls=8, trace=None):
                                         calls=calls, usage=u, usd=last.get("usd")), default=str) + "\n")
         if st["answer"] or not calls or st["calls"] >= max_calls:
             break
+    if st["answer"]:
+        msgs.append({"role": "assistant", "content": st["answer"]})     # the conversation goes on in session mode
+    st["seconds"] = time.time() - t0
+    st["context_end"] = int(sess["ratio"] * msg_tokens(msgs))
     return st
 
 
@@ -418,7 +522,34 @@ def main():
     ap.add_argument("--budget", type=float, default=5.0, help="cap on total USD across all paid runs (ledger)")
     ap.add_argument("--first", type=int, default=0, help="skip the first N tasks")
     ap.add_argument("--tag", default="", help="suffix for the results file")
+    ap.add_argument("--count-errors", action="store_true",
+                    help="a server error (e.g. context overflow) fails that arm instead of dropping the task")
+    ap.add_argument("--hint", action="store_true", help="add a call example to the system prompt (small models)")
+    ap.add_argument("--arms", default="baseline,cortex", help=f"comma-separated, first is the reference: {list(ARMS)}")
+    ap.add_argument("--coproc", default="", help="exported Cortex-SubNN head (.npz) for the coproc arms")
+    ap.add_argument("--session", action="store_true",
+                    help="all questions in one conversation per arm (context accumulates, as in a real session)")
+    ap.add_argument("--ctx", type=int, default=8192, help="server context size, for the +fade watermark")
+    ap.add_argument("--fade-mark", type=float, default=0.85, help="+fade arms fade once the context passes this share")
+    ap.add_argument("--fade-low", type=float, default=0.5, help="a fade batch shrinks the context below this share")
+    ap.add_argument("--fade-keep-frac", type=float, default=0.25,
+                    help="the kept newest results may hold at most this share of the context (the newest is always kept)")
+    ap.add_argument("--fade-keep", type=int, default=4, help="reads of files touched in the last N tool calls stay")
     a = ap.parse_args()
+    arms = [x.strip() for x in a.arms.split(",") if x.strip()]
+    bad = [x for x in arms if base_arm(x) not in ARMS or x not in (base_arm(x), base_arm(x) + "+fade")]
+    if bad or len(arms) < 2:
+        raise SystemExit(f"--arms: need 2+ of {list(ARMS)} (optionally +fade), got {arms}")
+    if a.meta and any(x.endswith("+fade") for x in arms):
+        raise SystemExit("+fade needs a backend that resends the history (--openai/--hf); --meta chains server-side")
+    if a.session and not a.count_errors:
+        raise SystemExit("--session needs --count-errors (an overflow must fail that arm, not drop the task)")
+    fade = dict(limit=a.ctx, mark=a.fade_mark, low=a.fade_low, keep=a.fade_keep, keep_frac=a.fade_keep_frac)
+    coproc = None
+    if any((ARMS[base_arm(x)] or {}).get("coproc") for x in arms):
+        from cortexnet.coproc import Coprocessor, MiniLM
+        coproc = Coprocessor(a.coproc, encoder=MiniLM())       # raises on a missing head or unusable calibration
+        print(f"coprocessor {a.coproc}: calib {[round(float(x), 3) for x in coproc.calib]}", flush=True)
     if a.meta:
         backend = MetaBackend(Ledger(a.budget), a.model if a.model != "local" else "muse-spark-1.3", effort=a.effort)
     elif a.openai:
@@ -426,18 +557,22 @@ def main():
     else:
         backend = HFBackend(a.hf or "Qwen/Qwen3-1.7B", a.think)
     root = fixture()
-    res = {arm: [] for arm in ("baseline", "cortex")}
+    res = {arm: [] for arm in arms}
     t0, stopped, skipped = time.time(), "", []
     os.makedirs(TRACES, exist_ok=True)
     name = re.sub(r"[^A-Za-z0-9]+", "_", backend.name + (f"_{a.effort}" if a.meta else "") + a.tag)
     trace = open(os.path.join(TRACES, f"live_ab_{name}_{time.strftime('%Y%m%d_%H%M%S')}.jsonl"), "w", encoding="utf8")
+    sessions = {arm: {} for arm in arms} if a.session else None
     try:
         for i, (q, rx) in enumerate(TASKS[a.first:a.tasks], a.first):
             pair = {}
             try:
                 for arm in res:            # a task counts only when both arms finished it
-                    st = run_task(backend, root, arm, q, os.path.join(root, ".state", arm), trace=trace)
-                    st["ok"] = bool(re.search(rx, st["answer"], re.I))
+                    st = run_task(backend, root, arm, q, os.path.join(root, ".state", arm.replace("+", "_")),
+                                  trace=trace, count_errors=a.count_errors, hint=a.hint, coproc=coproc,
+                                  session=sessions[arm] if sessions else None,
+                                  fade=fade if arm.endswith("+fade") else None)
+                    st["ok"] = not st["error"] and bool(re.search(rx, st["answer"], re.I))
                     pair[arm] = st
             except RuntimeError as e:      # API error after retries: drop this task from both arms, keep going
                 skipped.append(f"task {i + 1}: {e}")
@@ -445,15 +580,18 @@ def main():
                 continue
             for arm in res:
                 res[arm].append(pair[arm])
-            print(f"task {i + 1}: " + "  ".join(f"{arm} ok={p['ok']} in={p['input_tokens']} calls={p['calls']} "
-                                                f"${p['usd']:.4f}" for arm, p in pair.items()), flush=True)
+            print(f"task {i + 1}: " + "  ".join(
+                f"{arm} ok={p['ok']} in={p['input_tokens']} calls={p['calls']} ${p['usd']:.4f} {p['seconds']:.0f}s"
+                + (f" ctx={p['context_end']}" if a.session else "") + (f" faded={p['fades']}" if p["fades"] else "")
+                + (f" ERROR {p['error'][:80]}" if p["error"] else "") for arm, p in pair.items()), flush=True)
     except BudgetExceeded as e:
         stopped = f"Stopped at the budget cap: {e}."
         print(stopped, flush=True)
     finally:
         trace.close()
         shutil.rmtree(root, ignore_errors=True)
-    n = len(res["baseline"])
+    ref = arms[0]
+    n = len(res[ref])
     L = [f"# Live A/B: {backend.name}{f' (reasoning effort {a.effort})' if a.meta else ''}, {n} code questions "
          f"({time.time() - t0:.0f}s)", "",
          "| arm | accuracy | input tokens (sum over turns) | cached | output (reasoning) | tool-output tokens | "
@@ -464,18 +602,42 @@ def main():
                  f"{S('output_tokens'):,} ({S('reasoning_tokens'):,}) | {S('tool_tokens'):,} | {S('calls')} | "
                  f"${S('usd'):.3f} |")
     if n:
-        b, c = (sum(r["input_tokens"] for r in res[k]) for k in ("baseline", "cortex"))
-        L += ["", f"Cortex input tokens = {c / max(b, 1):.0%} of baseline."]
+        b = sum(r["input_tokens"] for r in res[ref])
+        L += [""] + [f"{arm} input tokens = {sum(r['input_tokens'] for r in res[arm]) / max(b, 1):.0%} of {ref}."
+                     for arm in arms[1:]]
+    if any(r["prefill_ms"] for rows in res.values() for r in rows):   # local server (llama-server timings)
+        L += ["", "Local run: prefill tokens are what the server actually computed (after its prefix cache); peak "
+              "context is the largest single request (prompt + completion).", "",
+              "| arm | answered | server errors | prefill tokens | prefill tok/s | prefill s | generation s | "
+              "wall s | peak context (max / mean) |", "|---|---|---|---|---|---|---|---|---|"]
+        for arm, rows in res.items():
+            S = lambda k: sum(r[k] for r in rows)  # noqa: E731
+            pk = [r["peak_context"] for r in rows]
+            L.append(f"| {arm} | {S('ok')}/{n} | {sum(bool(r['error']) for r in rows)} | {S('prefill_tokens'):,} | "
+                     f"{S('prefill_tokens') / max(S('prefill_ms') / 1e3, 1e-9):,.0f} | {S('prefill_ms') / 1e3:.1f} | "
+                     f"{S('gen_ms') / 1e3:.1f} | {S('seconds'):.0f} | {max(pk, default=0):,} / "
+                     f"{sum(pk) / max(len(pk), 1):,.0f} |")
+    if a.session:
+        L += ["", f"Session mode: one conversation per arm, {n} questions in a row, server context {a.ctx:,}; +fade arms "
+              f"shrink stale reads in one batch above {a.fade_mark:.0%}, down to {a.fade_low:.0%} (newest {a.fade_keep} results kept, at most {a.fade_keep_frac:.0%} of the context).", ""]
+        for arm, rows in res.items():
+            first = next((i for i, r in enumerate(rows, a.first + 1) if "context" in r["error"]), None)
+            L.append(f"- {arm}: reads faded {sum(r['fades'] for r in rows)}, context at the end "
+                     f"{rows[-1]['context_end'] if rows else 0:,}, first context overflow at question "
+                     f"{first if first else 'none'}")
+    errs = [(i, arm, r["error"]) for arm, rows in res.items() for i, r in enumerate(rows, a.first + 1) if r["error"]]
+    if errs:
+        L += ["", "Server errors counted as failures:"] + [f"- task {i} {arm}: {e[-200:]}" for i, arm, e in errs]
     if stopped:
         L += ["", stopped]
     if skipped:
         L += ["", "Skipped after API errors (both arms dropped):"] + [f"- {s}" for s in skipped]
     if getattr(backend, "chained_fallbacks", 0):
         L += ["", f"{backend.chained_fallbacks} turns resent the full history because the chained response was gone."]
-    L += ["", "Per task (baseline / cortex): ok, input tokens, tool calls", ""]
-    for i, (rb, rc) in enumerate(zip(res["baseline"], res["cortex"]), a.first):
-        L.append(f"- {i + 1}. {TASKS[i][0]}  {rb['ok']}/{rc['ok']}, {rb['input_tokens']:,}/{rc['input_tokens']:,}, "
-                 f"{rb['calls']}/{rc['calls']}")
+    L += ["", f"Per task ({' / '.join(arms)}): ok, input tokens, tool calls", ""]
+    for i, rows in enumerate(zip(*(res[x] for x in arms)), a.first):
+        L.append(f"- {i + 1}. {TASKS[i][0]}  {'/'.join(str(r['ok']) for r in rows)}, "
+                 f"{'/'.join(format(r['input_tokens'], ',') for r in rows)}, {'/'.join(str(r['calls']) for r in rows)}")
     out = os.path.join(HERE, "results", f"live_ab_{name}.md")
     open(out, "w", encoding="utf8").write("\n".join(L) + "\n")
     print("\n".join(L))

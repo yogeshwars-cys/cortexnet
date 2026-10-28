@@ -82,7 +82,11 @@ def main():
 
     # ---- 1. tokens and outcome
     M = {k: [eps[k][i]["metrics"] for i in common] for k in ARMS if k in eps}
-    keys = [("prefill", "prefill tokens (sum over turns)"), ("peak", "peak context tokens"),
+    for ms in M.values():   # a server with a prefix cache (llama-server, vLLM) prefills each context token once
+        for m in ms:
+            m["prefill_cached"] = m["peak"] - m["gen"]
+    keys = [("prefill", "prefill tokens (sum over turns)"),
+            ("prefill_cached", "prefill tokens with a prefix cache (fade: lower bound)"), ("peak", "peak context tokens"),
             ("peak_kv_mb", "peak KV cache (MB)"), ("turns", "turns"), ("gen_secs", "generation seconds")]
     L += ["## 1. Cost and outcome (paired)", "", "| metric | whole (mean) | cortex (mean) | fade (mean) | cortex / whole "
           "(95% CI) | fade / whole (95% CI) |", "|---|---|---|---|---|---|"]
@@ -99,7 +103,11 @@ def main():
     rt = {x: sum(m["tool_tok"].get("read_file", 0) + m["tool_tok"].get("read_lines", 0) for m in M[x]) for x in ARMS}
     L += ["", f"File tokens put into context (read_file + read_lines, summed): whole {rt['whole']:,}, cortex "
           f"{rt['cortex']:,} ({rt['cortex'] / max(rt['whole'], 1):.0%}), fade {rt['fade']:,}. Reads faded in the fade "
-          f"arm: {sum(m['faded'] for m in M['fade'])}.", ""]
+          f"arm: {sum(m['faded'] for m in M['fade'])}.", "",
+          "Prefix-cache row: final context minus generated tokens, i.e. each token prefilled once. Exact for whole and "
+          "cortex (their history is append-only). Fade rewrites earlier reads, which forces a re-prefill from that "
+          "point on, so its row is a lower bound; its real cost under caching is not recoverable from these records.",
+          ""]
 
     # ---- 2. attention usage (whole arm)
     rng = np.random.default_rng(0)

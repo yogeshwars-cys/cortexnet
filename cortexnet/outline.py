@@ -220,3 +220,32 @@ def outline(text, path="", syms=None):
     n = text.count("\n") + 1
     head = f"{path or '<file>'}: {n} lines, ~{tokens(text)} tokens. Outline (ask for line ranges to see bodies):"
     return "\n".join([head] + [s.label() for s in syms])
+
+
+FLOW = re.compile(r"^\s*(if|elif|else|for|while|try|except|finally|with|return|raise|yield|match|case|switch|catch|"
+                  r"throw|break|continue)\b")
+
+
+def skeleton(s, lines, words=(), max_lines=12, window=2):
+    """An x-ray of a symbol: line numbers to show, at most max_lines, by priority: the signature (until the line that
+    closes it, at most 4 lines), lines holding any of `words` with `window` lines around them, then the control-flow
+    spine (if/for/return/raise..., shallowest first). Lines are 1-based, sorted."""
+    a, b = s.start, s.end
+    pick = []
+
+    def add(ln):
+        if a <= ln <= b and ln not in pick and len(pick) < max_lines:
+            pick.append(ln)
+    for ln in range(a, min(b, a + 3) + 1):
+        add(ln)
+        if lines[ln - 1].rstrip().endswith((":", "{")):
+            break
+    words = {w for w in words if w}
+    for ln in range(a, b + 1):
+        if words and words & set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", lines[ln - 1])):
+            for k in range(ln - window, ln + window + 1):
+                add(k)
+    depth = lambda ln: len(lines[ln - 1]) - len(lines[ln - 1].lstrip())  # noqa: E731
+    for ln in sorted((ln for ln in range(a + 1, b + 1) if FLOW.match(lines[ln - 1])), key=lambda ln: (depth(ln), ln)):
+        add(ln)
+    return sorted(pick)

@@ -70,13 +70,18 @@ def handle(reader, req):
 
 def options(env=os.environ):
     """Opt-in extras: CORTEXNET_COPROC=<exported head .npz> (needs torch + transformers for MiniLM),
-    CORTEXNET_POLICY=rule_ab, CORTEXNET_GRAPH=1, CORTEXNET_CTX_BASE=<tokens of context before the first read>."""
+    CORTEXNET_POLICY=rule_ab, CORTEXNET_GRAPH=1, CORTEXNET_MENU=1 (connected symbols from neighbouring files),
+    CORTEXNET_CTX_BASE=<tokens of context before the first read>. COPROC + GRAPH + MENU = the measured full system."""
     kw = dict(policy=env.get("CORTEXNET_POLICY", "budget"), ctx_base=int(env.get("CORTEXNET_CTX_BASE", "20000")))
+    if env.get("CORTEXNET_MENU") == "1":
+        kw["menu"] = True
     if env.get("CORTEXNET_COPROC"):
         try:
             from .coproc import Coprocessor, MiniLM
-            kw["coproc"] = Coprocessor(env["CORTEXNET_COPROC"], encoder=MiniLM())
-        except (ImportError, OSError) as e:
+            cp = Coprocessor(env["CORTEXNET_COPROC"])        # the head first: a bad path fails before MiniLM loads
+            cp.encoder = MiniLM()
+            kw["coproc"] = cp
+        except (ImportError, OSError, ValueError) as e:      # ValueError: a head with unusable calibration
             print(f"cortexnet: coprocessor off ({type(e).__name__}: {e})", file=sys.stderr)
     if env.get("CORTEXNET_GRAPH") == "1":
         from .graph import CoNeedGraph

@@ -44,7 +44,7 @@ import torch.nn.functional as Fn
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from cortexnet import outline, symbols, tokens  # noqa: E402
 from cortexnet.learn import FEATURES, featurize, idents  # noqa: E402
-from cortexnet.coproc import leaves, subspans  # noqa: E402  (shared with the runtime)
+from cortexnet.coproc import calib_features, leaves, subspans  # noqa: E402  (shared with the runtime)
 from cortexnet.policy import ALPHA_CACHE, TOOL_OVH, rule_ab  # noqa: E402
 
 DATA = os.environ.get("SUBNN_DATA", "D:/dev-cache/cortexnet/subnn")
@@ -541,13 +541,18 @@ def evaluate_rank(score, cases):
 
 
 def platt(scores, cases):
-    """Fit p = sigmoid(a s + b) on validation symbols (temperature + bias)."""
+    """Fit p = sigmoid(w . calib_features(s) + b) on validation symbols (see cortexnet/coproc.py). The ranking inside
+    a read depends only on w[0], the weight of s - max s, so w[0] must come out positive. A fit on raw scores pooled
+    across files came out negative on 2026-10-27 (a = -0.71) and reversed every read's order."""
     from sklearn.linear_model import LogisticRegression
-    x = np.concatenate([np.asarray(scores(c), float) for c in cases])[:, None]
+    x = np.concatenate([calib_features(scores(c)) for c in cases])
     y = np.concatenate([c["y"] for c in cases])
     lr = LogisticRegression(C=10.0).fit(x, y)
-    f = lambda s: lr.predict_proba(np.asarray(s, float)[:, None])[:, 1]  # noqa: E731
-    f.ab = (float(lr.coef_[0, 0]), float(lr.intercept_[0]))
+    f = lambda s: lr.predict_proba(calib_features(s))[:, 1]  # noqa: E731
+    f.ab = tuple(float(v) for v in lr.coef_[0]) + (float(lr.intercept_[0]),)
+    if f.ab[0] <= 0:
+        print(f"WARNING: calibration weight on s - max s is {f.ab[0]:.3f} <= 0: it would reverse the ranking",
+              flush=True)
     return f
 
 
@@ -866,17 +871,20 @@ def export_head(pack, C, cfg, path, enc_name, codec):
     va = [c for c in real if c["c"]["sid"] in val_sids]
     tr = [c for c in C if c["c"]["sid"] not in val_sids]
     m, vb = train(pack, tr, va, cfg, 0)
-    pa, pb = platt(scorer(m, pack, va, cfg), va).ab
+    cal = platt(scorer(m, pack, va, cfg), va).ab              # (w_rel, w_max, w_logn, b)
+    if cal[0] <= 0:
+        raise SystemExit(f"not exporting: calibration weight on s - max s is {cal[0]:.3f} <= 0")
     t = lambda x: x.detach().float().cpu().numpy()  # noqa: E731
     out = dict(g=t(m.g), dg=t(m.dg), A=t(m.A), B=t(m.B), Wg_w=t(m.Wg.weight), Wg_b=t(m.Wg.bias), ws_w=t(m.ws.weight),
-               ws_b=t(m.ws.bias), phi_mu=t(m.phi_mu), phi_sd=t(m.phi_sd), platt=np.array([pa, pb], np.float32),
+               ws_b=t(m.ws.bias), phi_mu=t(m.phi_mu), phi_sd=t(m.phi_sd), calib=np.array(cal, np.float32),
                flags=np.array([cfg["views"] == "multi", cfg["gate"], cfg["late"], cfg["struct"], cfg["diag"],
                                cfg["lowrank"]]), gamma=np.float32(GAMMA), features=np.array(FEATURES),
                encoder=np.array(enc_name.split(",")[0]), val_mrr=np.float32(vb))
     if codec is not None:
         out.update(codec_V=codec.V, codec_bits=codec.bits, codec_levels=codec.levels)
     np.savez(path, **out)
-    print(f"exported head to {path} (validation MRR {vb:.3f}, Platt a={pa:.2f} b={pb:.2f})", flush=True)
+    print(f"exported head to {path} (validation MRR {vb:.3f}, calibration w_rel {cal[0]:.2f} w_max {cal[1]:.2f} "
+          f"w_logn {cal[2]:.2f} b {cal[3]:.2f})", flush=True)
 
 
 def write_report(pooled, per_fold, per_seed, cost, pi, has_h, te, le, time_rows, n_time, K, t0, enc_name, dim,
