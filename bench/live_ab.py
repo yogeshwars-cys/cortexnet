@@ -103,10 +103,21 @@ HINT = ('\nUse a path exactly as listed above, e.g. read_file with path "cortexn
         "error, fix the call and try again; do not answer from an error message.")
 
 
-def fixture():
+def fixture(ref=""):
+    """The workspace the agent reads. ref: take cortexnet/ from that git commit instead of the working tree, so the
+    questions' corpus (and the file list in the system prompt) stays fixed while the code under test changes."""
     d = tempfile.mkdtemp(dir=os.environ.get("TMP"))
     for src, name in SOURCES:
         dst = os.path.join(d, name)
+        if ref and name == "cortexnet":
+            import io
+            import subprocess
+            import tarfile
+            tar = subprocess.run(["git", "-C", REPO, "archive", "--format=tar", ref, "cortexnet"], check=True,
+                                 capture_output=True).stdout
+            with tarfile.open(fileobj=io.BytesIO(tar)) as t:
+                t.extractall(d, filter="data")
+            continue
         if os.path.isdir(src):
             shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.json", "*.npz"))
         else:
@@ -139,8 +150,13 @@ def tool_specs(arm):
 # "full" = every CortexNET part: coprocessor (additive + rank pick), symbol graph, connected-symbol menu (with the
 # cortex_approve tool), on top of outline-first reads, sub-block splits and the trail.
 # Any arm + "+fade" (e.g. cortex+fade) also fades stale reads to outlines in one batch near the context limit.
+# "fulldyn" adds the refractory bodies and the charge-ordered fade (cortexnet/reader.py, fade.py). The "neuro*" arms of
+# results/live_ab_llama_3_1_8b_session8k_neuro.md ran the coprocessor as a neuromorphic twin, since removed (it gave
+# the same picks as the conventional head).
 ARMS = {"baseline": None, "cortex": {}, "coproc": dict(coproc=True), "coproc_ab": dict(coproc=True, policy="rule_ab"),
-        "full": dict(coproc=True, menu=True, graph=True)}
+        "full": dict(coproc=True, menu=True, graph=True),
+        "fulldyn": dict(coproc=True, menu=True, graph=True, refractory=True, fade_order="charge"),
+        "coprocdyn": dict(coproc=True, refractory=True, fade_order="charge")}
 
 
 def base_arm(arm):
@@ -155,10 +171,13 @@ class Tools:
         self.root, self.arm, self.task = root, arm, task
         cfg = ARMS[base_arm(arm)]
         kw = dict(cfg or {})
-        if kw.pop("coproc", False):
-            if coproc is None:
+        self.fade_order = kw.pop("fade_order", "age")
+        which = kw.pop("coproc", False)
+        if which:
+            cp = coproc.get(which) if isinstance(coproc, dict) else coproc
+            if cp is None:
                 raise SystemExit(f"arm {arm} needs --coproc <head.npz>")
-            kw.update(coproc=coproc, ctx_base=ctx_base)
+            kw.update(coproc=cp, ctx_base=ctx_base)
         if kw.pop("graph", False):
             from cortexnet.graph import CoNeedGraph
             kw["graph"] = CoNeedGraph()
@@ -300,14 +319,14 @@ class HFBackend:
         return content, calls, int(ids.shape[1])
 
 
-def post(url, body, key=None, tries=4):
+def post(url, body, key=None, tries=4, timeout=600):
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = "Bearer " + key
     for i in range(tries):
         try:
             req = urllib.request.Request(url, json.dumps(body).encode(), headers)
-            return json.loads(urllib.request.urlopen(req, timeout=600).read())
+            return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
         except urllib.error.HTTPError as e:
             msg = e.read().decode(errors="replace")[:500]
             # llama-server's 500 for a tool call it cannot parse is the model's output at temperature 0: a retry
@@ -384,9 +403,10 @@ class MetaBackend:
     def chat(self, messages, tools):
         prev = next((m for m in reversed(messages) if m.get("_resp_id")), None)
         if prev:
-            new = messages[messages.index(prev) + 1:]
+            new = messages[messages.index(prev) + 1:]          # tool outputs, and in session mode the next question
             items = [{"type": "function_call_output", "call_id": m["tool_call_id"], "output": m["content"]}
-                     for m in new if m["role"] == "tool"]
+                     if m["role"] == "tool" else {"role": "user", "content": m["content"]}
+                     for m in new if m["role"] in ("tool", "user")]
         else:
             items = self.full_items(messages)
         body = {"model": self.name, "input": items, "max_output_tokens": self.max_output, "store": True,
@@ -402,7 +422,7 @@ class MetaBackend:
         try:
             r = post(self.base + "/responses", body, self.key)
         except RuntimeError as e:
-            if not prev or "not found" not in str(e):
+            if not prev or re.match(r"HTTP 40[13]\b", str(e)):   # a broken chain: resend the whole history
                 raise
             self.chained_fallbacks = getattr(self, "chained_fallbacks", 0) + 1
             body.pop("previous_response_id")
@@ -457,9 +477,11 @@ def run_task(backend, root, arm, q, state, max_calls=8, trace=None, count_errors
     t0 = time.time()
     for turn in range(max_calls + 1):
         if fade:
+            forget = tools.reader.forget if tools.reader is not None and tools.reader.refractory else None
             st["fades"] += watermark_fade(msgs, sess["ratio"] * msg_tokens(msgs), fade["limit"], tools.outline,
                                           mark=fade["mark"], low=fade["low"], keep=fade["keep"],
-                                          keep_frac=fade["keep_frac"], scale=sess["ratio"])
+                                          keep_frac=fade["keep_frac"], scale=sess["ratio"], order=tools.fade_order,
+                                          on_fade=forget)
         sent = msg_tokens(msgs)
         try:
             content, calls, n_in = backend.chat(msgs, specs)
@@ -474,9 +496,11 @@ def run_task(backend, root, arm, q, state, max_calls=8, trace=None, count_errors
         u = last.get("usage") or {}
         out_n = u.get("output_tokens", u.get("completion_tokens", 0))
         st["input_tokens"] += n_in
-        st["cached_tokens"] += (u.get("input_tokens_details") or {}).get("cached_tokens", 0)
+        st["cached_tokens"] += (u.get("input_tokens_details") or u.get("prompt_tokens_details") or {}).get(
+            "cached_tokens", 0)                                 # Responses or chat-completions field names
         st["output_tokens"] += out_n
-        st["reasoning_tokens"] += (u.get("output_tokens_details") or {}).get("reasoning_tokens", 0)
+        st["reasoning_tokens"] += (u.get("output_tokens_details") or u.get("completion_tokens_details") or {}).get(
+            "reasoning_tokens", 0)
         st["usd"] += last.get("usd", 0.0)
         tm = last.get("timings") or {}
         st["prefill_tokens"] += tm.get("prompt_n", 0)
@@ -504,7 +528,10 @@ def run_task(backend, root, arm, q, state, max_calls=8, trace=None, count_errors
         if st["answer"] or not calls or st["calls"] >= max_calls:
             break
     if st["answer"]:
-        msgs.append({"role": "assistant", "content": st["answer"]})     # the conversation goes on in session mode
+        # the conversation goes on in session mode; the answer's response id is the chain's next link (--meta)
+        # (only when that response has no unanswered tool calls, i.e. the cap did not end the task)
+        rid = getattr(backend, "last", {}).get("resp_id") if not calls else None
+        msgs.append({"role": "assistant", "content": st["answer"], "_resp_id": rid})
     st["seconds"] = time.time() - t0
     st["context_end"] = int(sess["ratio"] * msg_tokens(msgs))
     return st
@@ -535,6 +562,8 @@ def main():
     ap.add_argument("--fade-keep-frac", type=float, default=0.25,
                     help="the kept newest results may hold at most this share of the context (the newest is always kept)")
     ap.add_argument("--fade-keep", type=int, default=4, help="reads of files touched in the last N tool calls stay")
+    ap.add_argument("--fixture-ref", default="", help="git commit for the cortexnet/ sources the agent reads "
+                    "(default: the working tree)")
     a = ap.parse_args()
     arms = [x.strip() for x in a.arms.split(",") if x.strip()]
     bad = [x for x in arms if base_arm(x) not in ARMS or x not in (base_arm(x), base_arm(x) + "+fade")]
@@ -548,15 +577,16 @@ def main():
     coproc = None
     if any((ARMS[base_arm(x)] or {}).get("coproc") for x in arms):
         from cortexnet.coproc import Coprocessor, MiniLM
-        coproc = Coprocessor(a.coproc, encoder=MiniLM())       # raises on a missing head or unusable calibration
-        print(f"coprocessor {a.coproc}: calib {[round(float(x), 3) for x in coproc.calib]}", flush=True)
+        cp = Coprocessor(a.coproc, encoder=MiniLM())           # raises on a missing head or unusable calibration
+        coproc = {True: cp}
+        print(f"coprocessor {a.coproc}: calib {[round(float(x), 3) for x in cp.calib]}", flush=True)
     if a.meta:
         backend = MetaBackend(Ledger(a.budget), a.model if a.model != "local" else "muse-spark-1.3", effort=a.effort)
     elif a.openai:
         backend = OpenAIBackend(a.openai, a.model, os.environ.get("OPENAI_API_KEY"))
     else:
         backend = HFBackend(a.hf or "Qwen/Qwen3-1.7B", a.think)
-    root = fixture()
+    root = fixture(a.fixture_ref)
     res = {arm: [] for arm in arms}
     t0, stopped, skipped = time.time(), "", []
     os.makedirs(TRACES, exist_ok=True)

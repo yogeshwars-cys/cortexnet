@@ -78,7 +78,7 @@ def options(env=os.environ):
     if env.get("CORTEXNET_COPROC"):
         try:
             from .coproc import Coprocessor, MiniLM
-            cp = Coprocessor(env["CORTEXNET_COPROC"])        # the head first: a bad path fails before MiniLM loads
+            cp = Coprocessor(env["CORTEXNET_COPROC"])        # the head first: a bad path fails before MiniLM
             cp.encoder = MiniLM()
             kw["coproc"] = cp
         except (ImportError, OSError, ValueError) as e:      # ValueError: a head with unusable calibration

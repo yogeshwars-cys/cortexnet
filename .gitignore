@@ -7,3 +7,7 @@ data/
 *.rr.npz
 bench/results/traces/
 .serena/
+cortexnet.egg-info/
+.benchmarks/
+.ruff_cache/
+.pytest_cache/

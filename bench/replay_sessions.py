@@ -41,7 +41,13 @@ ARMS = {"outline only (no up-front includes)": dict(features=V1, menu=False, tau
         "+ trail": dict(features=V1 + ["trail"], menu=False),
         "+ trail + graph": dict(features=FEATURES, menu=False),
         "+ trail + graph + menu": dict(features=FEATURES, menu=True),
-        "Rule A/B policy (prefix-cache cost), split 600": dict(menu=False, split_tokens=600, policy="rule_ab")}
+        "Rule A/B policy (prefix-cache cost), split 600": dict(menu=False, split_tokens=600, policy="rule_ab"),
+        # neural-dynamics options (cortexnet/reader.py, learn.py), each on top of "+ trail + graph + menu"
+        "+ homeostatic threshold (beta 1)": dict(features=FEATURES, menu=True, homeostasis=1.0),
+        "+ homeostatic threshold (beta 3)": dict(features=FEATURES, menu=True, homeostasis=3.0),
+        "+ refractory shown bodies": dict(features=FEATURES, menu=True, refractory=True),
+        "+ normalised online learning (nlms)": dict(features=FEATURES, menu=True, learn_rule="nlms"),
+        "+ winner-take-all menu (floor 0.25)": dict(features=FEATURES, menu=True, menu_rule="wta")}
 HEAD = os.environ.get("CORTEXNET_HEAD")      # an exported Cortex-SubNN head (bench/subnn_train.py --export)
 # compounding cost per token / per extra round trip at the session medians (H_rem 72, logged context ~43k)
 M_TOK, T_TRIP = 1 + 0.1 * 72, 0.1 * 43000 + 400
@@ -202,6 +208,10 @@ def main():
         cp = Coprocessor(HEAD, encoder=MiniLM())
         ARMS["budget fill + coprocessor"] = dict(menu=False, split_tokens=600, coproc=cp)
         ARMS["Rule A/B + coprocessor"] = dict(menu=False, split_tokens=600, policy="rule_ab", coproc=cp)
+    only = os.environ.get("REPLAY_ONLY")                # regex over arm names: run a subset
+    if only:
+        for name in [n for n in ARMS if not re.search(only, n)]:
+            del ARMS[name]
     sessions = load_sessions()
     root = tempfile.mkdtemp(dir=os.environ.get("TMP"))
     print(f"{len(sessions)} sessions with reads and edits", flush=True)

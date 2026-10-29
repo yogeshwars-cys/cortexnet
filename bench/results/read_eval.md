@@ -1,6 +1,6 @@
 # Offline read evaluation: SWE-bench Lite read cases
 
-139 read_file cases from the Glimmer A/B episodes (107 with gold-patch lines in the read file), one read each, query = issue text, snapshot = the agent's reasoning before the read. Coprocessor head `head_minilm_c64_v2.npz` (trained without SWE data). (352s)
+139 read_file cases from the Glimmer A/B episodes (107 with gold-patch lines in the read file), one read each, query = issue text, snapshot = the agent's reasoning before the read. Coprocessor head `head_minilm_c64_v2.npz` (trained without SWE data). (475s)
 
 | configuration | gold-line recall (mean) | reads with all gold lines visible | needed symbol visible | tokens per read (mean) | share of the whole file (median) |
 |---|---|---|---|---|---|
@@ -10,6 +10,8 @@
 | coprocessor + x-ray | 0.444 | 34% | 87% | 2,806 | 29% |
 | coprocessor top-3 | 0.497 | 37% | 74% | 2,724 | 27% |
 | coprocessor top-3 + MMR | 0.476 | 35% | 73% | 2,722 | 27% |
+| neuromorphic twin | 0.396 | 32% | 55% | 2,498 | 23% |
+| neuromorphic twin top-3 | 0.497 | 37% | 74% | 2,724 | 27% |
 
 Paired differences against `v1`, 95% intervals from a bootstrap over the 40 tasks (reads of one task resampled together, since they are not independent):
 
@@ -23,3 +25,9 @@ Paired differences against `v1`, 95% intervals from a bootstrap over the 40 task
 - coprocessor top-3, tokens per read: +338.770 [+265.500, +417.992]
 - coprocessor top-3 + MMR, gold-line recall: +0.164 [+0.069, +0.279]
 - coprocessor top-3 + MMR, tokens per read: +336.317 [+268.848, +412.936]
+- neuromorphic twin, gold-line recall: +0.084 [+0.014, +0.177]
+- neuromorphic twin, tokens per read: +112.511 [+79.528, +150.722]
+- neuromorphic twin top-3, gold-line recall: +0.185 [+0.085, +0.303]
+- neuromorphic twin top-3, tokens per read: +338.770 [+266.204, +415.249]
+
+Neuromorphic twin over its 268 reads: 0.76 synaptic events per dense multiply-add, 95% of symbol cells inhibited (silent).
