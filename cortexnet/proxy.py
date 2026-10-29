@@ -344,6 +344,10 @@ class Rewriter:
         # shell: outline long outputs of shell commands that are not file reads (cortexnet/shellout.py)
         self.shell = shell if shell is not None else os.environ.get("CORTEXNET_PROXY_SHELL", "0") == "1"
         self.task, self.ctx = "", {}
+        # snn: a spiking file manager per model behind the proxy, learning where it looks next (cortexnet/filesnn.py).
+        # The proxy sees a read only after the model made it, so here it learns and reports; it cannot warm ahead.
+        self.snn_on = os.environ.get("CORTEXNET_SNN", "0") == "1"
+        self.managers, self.snn_seen = {}, set()
         self.memo, self.outlined, self.lock = {}, set(), threading.Lock()
         self.tool_calls, self.last_calls = {}, {}
         self.shapes = int(os.environ.get("CORTEXNET_PROXY_SHAPES", "0"))    # debug: log key skeletons, no values
@@ -522,6 +526,12 @@ class Rewriter:
                 self._tally(body)
         except Exception:
             pass
+        if self.snn_on:
+            try:
+                with self.lock:
+                    stats["files"] = self._files(body, stats["model"])
+            except Exception as e:
+                print(f"cortexnet-proxy: file manager skipped ({type(e).__name__}: {e})", file=sys.stderr)
         if not self.rewrite_on:
             return raw, stats
         try:
@@ -545,6 +555,37 @@ class Rewriter:
         if not stats.pop("changed", False) and not stats["dropped_tools"]:
             return raw, stats
         return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf8"), stats
+
+    def _files(self, body, model):
+        """Each fresh file read of the newest turn teaches the model's spiking file manager: the model's words in that
+        turn are its input, the file it read is the truth. Returns its agreement so far (logged with the request)."""
+        from .filesnn import SpikingFileManager
+        from .outline import symbols
+        fm = self.managers.get(model)
+        if fm is None:
+            fm = self.managers[model] = SpikingFileManager(model=model or "model", state_dir=self.state_dir)
+        task, ctx = intents(body)
+        cwd = find_cwd(body)
+        for _, _, cid, call, fresh, err in self._results(body):
+            if not fresh or err or not call or cid in self.snn_seen:
+                continue
+            self.snn_seen.add(cid)
+            c = classify(call[0], call[1], cwd)
+            if not c:
+                continue
+            path = c[1]
+            fm.predict(task + "\n" + ctx.get(cid, ("", ""))[0])
+            fm.used(path)
+            try:
+                with open(path, encoding="utf8", errors="replace") as f:
+                    text = f.read()
+                fm.know(path, [x.name for x in symbols(text, path) if not x.children][:60])
+            except OSError:
+                pass
+        if fm.steps and fm.steps % 10 == 0:
+            fm.save()
+        a = fm.agreement()
+        return {k: (round(v, 3) if isinstance(v, float) else v) for k, v in a.items()} if a["steps"] else None
 
     def log(self, path, status, stats, usage, seconds):
         rec = dict(ts=time.time(), path=path, status=status, seconds=round(seconds, 3), usage=usage, **stats)
@@ -719,6 +760,19 @@ def summarize(usage_path, since=0.0):
     if "promptTokenCount" in tot:
         lines.append(f"gemini: prompt {g('promptTokenCount', 0)} (cached {g('cachedContentTokenCount', 0)}), "
                      f"output {g('candidatesTokenCount', 0)}, thoughts {g('thoughtsTokenCount', 0)}")
+    managers = {}                                  # the latest agreement of each model's file manager (CORTEXNET_SNN=1)
+    if os.path.exists(usage_path):
+        with open(usage_path, encoding="utf8") as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("ts", 0) >= since and r.get("files"):
+                    managers[r.get("model") or "model"] = r["files"]
+    for model, t in managers.items():
+        lines.append(f"spiking file manager for {model}: hit@1 {t['hit@1']:.0%}, hit@3 {t['hit@3']:.0%} over "
+                     f"{t['steps']} predictions; {t['silent']:.0%} of its neurons silent")
     return "\n".join(lines)
 
 

@@ -24,6 +24,16 @@ Optional (all off by default):
            (cortexnet/policy.py) instead of filling a fixed budget.
   graph    a cortexnet.graph.CoNeedGraph over the coprocessor's code cells: ranged/approved symbols are co-needs,
            and the [connected] menu also offers co-needed symbols from any file seen before.
+
+Neural-dynamics options (all off by default; bench/replay_sessions.py measures each):
+  homeostasis  gain beta > 0: the include threshold is a thermostat on the session's miss rate. H_miss, a leaky
+           average of "a read was followed by a range request for a body it did not show", moves the threshold:
+           tau_t = tau * exp(-beta * (H_miss - miss_target)): more misses lower it (show more), fewer raise it.
+  refractory   a body this session already sent, unchanged since, is not sent again by a later read of the file: a
+           one-line back-reference instead. `forget(path)` (called by the fade when it shrinks a read) ends it.
+  menu_rule    "wta": menu candidates compete; their scores are normalised against the winner (softmax over the log
+           scores) and only those above `menu_floor` are offered, up to menu_size, so a flat field offers nothing.
+  learn_rule   "nlms": the include model's per-feature normalised steps (cortexnet/learn.py).
 """
 import difflib
 import json
@@ -50,27 +60,40 @@ class Reader:
     def __init__(self, state_dir=None, full_below=800, budget_frac=0.25, budget_min=400, tau=0.5, horizon=10,
                  features=None, menu=False, menu_size=3, tau_menu=0.35, neighbours=40, split_tokens=0,
                  coproc=None, policy="budget", ctx_base=20000, h_rem=H_REM_PRIOR, graph=None, coproc_top=1,
-                 coproc_max=400, xray_top=0, xray_lines=12, xray_budget=400, mmr_beta=0.0):
+                 coproc_max=400, xray_top=0, xray_lines=12, xray_budget=400, mmr_beta=0.0, homeostasis=0.0,
+                 miss_target=0.3, homeo_rate=0.1, refractory=False, menu_rule="topk", menu_floor=0.25,
+                 learn_rule="logistic"):
         self.coproc, self.policy, self.ctx_base, self.h_rem, self.graph = coproc, policy, ctx_base, h_rem, graph
+        self.homeostasis, self.miss_target, self.homeo_rate = homeostasis, miss_target, homeo_rate
+        self.h_miss = miss_target              # the thermostat starts at its set point
+        self.refractory, self.live, self.reads = refractory, {}, 0     # live: (path, a, b) -> (read no., body hash)
+        self.menu_rule, self.menu_floor = menu_rule, menu_floor
         self.coproc_top, self.coproc_max = coproc_top, coproc_max
         self.xray_top, self.xray_lines, self.xray_budget = xray_top, xray_lines, xray_budget
         self.mmr_beta = mmr_beta              # > 0: the coprocessor's picks avoid near-duplicates of each other
         self.served, self.text_of, self.cell_of = 0, {}, {}      # tokens returned; trail texts; symbol -> cell
         self.state_dir = state_dir or os.path.join(os.getcwd(), ".cortexnet")
         os.makedirs(self.state_dir, exist_ok=True)
-        self.model = IncludeModel(os.path.join(self.state_dir, "include.json"), horizon=horizon)
+        self.model = IncludeModel(os.path.join(self.state_dir, "include.json"), horizon=horizon, rule=learn_rule)
         self.full_below, self.budget_frac, self.budget_min, self.tau = full_below, budget_frac, budget_min, tau
         self.mask = None if features is None else np.array([f in features for f in FEATURES])
         self.menu_on, self.menu_size, self.tau_menu, self.max_nb = menu, menu_size, tau_menu, neighbours
         self.split_tokens = split_tokens       # > 0: sub-blocks under leaf symbols bigger than this
         self.files, self.asked, self.events, self.calls = {}, {}, [], 0
         self.trail, self.active, self.menu, self.menu_n = {}, [], {}, 0
-        self.index = {}
+        self.index, self.parsed = {}, {}
+        self.last = {}                         # path -> why the last read showed what it did (the CLI's /why)
         self.log_path = os.path.join(self.state_dir, "events.jsonl")
 
     # ---------------------------------------------------------------- bookkeeping
     def _symbols(self, text, p):
-        return symbols(text, p, self.split_tokens)
+        key = (p, len(text), hash(text))                 # parse once per file content (prefetch warms this)
+        hit = self.parsed.get(key)
+        if hit is None:
+            hit = self.parsed[key] = tuple(symbols(text, p, self.split_tokens))
+            if len(self.parsed) > 256:
+                self.parsed.pop(next(iter(self.parsed)))
+        return list(hit)
 
     def _log(self, **kw):
         kw["ts"] = time.time()
@@ -143,13 +166,45 @@ class Reader:
             s0, s1 = ev["spans"][k]
             y.append(int(any(min(s1, b) - max(s0, a) + 1 >= max(1, 0.5 * min(s1 - s0 + 1, b - a + 1))
                              for a, b in ev["requests"])))
+        if self.homeostasis and "menu" not in ev:              # the thermostat: did this read miss a needed body?
+            self.h_miss += self.homeo_rate * (float(any(y)) - self.h_miss)
         self.model.update(ev["X"][idx], y)
         self.model.save()
+
+    def tau_now(self):
+        """The include threshold in force (homeostatic when enabled)."""
+        if not self.homeostasis:
+            return self.tau
+        return float(np.clip(self.tau * np.exp(-self.homeostasis * (self.h_miss - self.miss_target)), 0.05, 0.95))
+
+    def forget(self, path):
+        """The fade shrank a read of `path`: its bodies are no longer in context, so they may be sent again."""
+        p = os.path.abspath(path)
+        for k in [k for k in self.live if k[0] == p]:
+            del self.live[k]
 
     def _request(self, p, a, b):
         for ev in self.events:
             if ev["path"] == p:
                 ev["requests"].append((a, b))
+
+    def warm(self, path):
+        """Do a later read's expensive work now (prefetch): parse the file's symbols and, with a coprocessor, encode
+        their sub-spans into its cache. Returns True if anything was computed. Changes no reader state."""
+        p = os.path.abspath(path)
+        with open(p, encoding="utf8", errors="replace") as f:
+            text = f.read()
+        if tokens(text) <= self.full_below:
+            return False                                 # read whole: nothing to precompute
+        key = (p, len(text), hash(text))
+        fresh = key not in self.parsed
+        syms = self._symbols(text, p)
+        if self.coproc is None:
+            return fresh
+        leaf = [s for s in syms if not s.children]
+        before = len(self.coproc.store)
+        self.coproc.symbol_vectors(p, text.split("\n"), leaf)
+        return fresh or len(self.coproc.store) > before
 
     def _load(self, path):
         p = os.path.abspath(path)
@@ -227,7 +282,7 @@ class Reader:
                     cands.append((P[k] / cost ** 0.5, P[k], q, s, cost, X[k]))
         cands.sort(key=lambda c: -c[0])
         picked = []
-        for _, pk, q, s, cost, x in cands[:self.menu_size]:
+        for _, pk, q, s, cost, x in self._compete(cands, lambda c: c[0]):
             self.menu_n += 1
             mid = f"#{self.menu_n}"
             self.menu[mid] = dict(path=q, a=s.start, b=s.end, key=(q, s.start, s.end), name=s.name, cost=cost)
@@ -247,7 +302,8 @@ class Reader:
             return []
         cells = list(dict.fromkeys(self.cell_of[k] for _, k, _, _ in reversed(self.active) if k in self.cell_of))
         taken = {m["key"] for m in self.menu.values()}
-        picked = []
+        cands = []                                  # (co-need weight or None for the same cell, key, name, cost)
+        limit = self.menu_size * (4 if self.menu_rule == "wta" else 1)
         for cell, w in self.graph.neighbours(cells, k=10) + [(c, None) for c in cells]:   # cells newest first
             for key, name in self.graph.members.get(cell, {}).items():
                 q, a, b = key
@@ -255,15 +311,34 @@ class Reader:
                     continue
                 with open(q, encoding="utf8", errors="replace") as f:
                     cost = tokens("\n".join(f.read().split("\n")[a - 1:b]))
-                self.menu_n += 1
-                mid = f"#{self.menu_n}"
-                self.menu[mid] = dict(path=q, a=a, b=b, key=key, name=name, cost=cost)
                 taken.add(key)
-                why = "same semantic cell" if w is None else f"co-needed {w:.1f}"
-                picked.append(f"  {mid} {os.path.basename(q)}:{name} (lines {a}-{b}, ~{cost} tok, {why})")
-                if len(picked) >= self.menu_size:
-                    return picked
+                cands.append((w, key, name, cost))
+                if len(cands) >= limit:
+                    break
+            if len(cands) >= limit:
+                break
+        known = [c[0] for c in cands if c[0] is not None]
+        floor_w = min(known) if known else 1.0      # a same-cell item competes as the weakest co-needed one
+        picked = []
+        for w, key, name, cost in self._compete(cands, lambda c: c[0] if c[0] is not None else floor_w):
+            q, a, b = key
+            self.menu_n += 1
+            mid = f"#{self.menu_n}"
+            self.menu[mid] = dict(path=q, a=a, b=b, key=key, name=name, cost=cost)
+            why = "same semantic cell" if w is None else f"co-needed {w:.1f}"
+            picked.append(f"  {mid} {os.path.basename(q)}:{name} (lines {a}-{b}, ~{cost} tok, {why})")
         return picked
+
+    def _compete(self, items, score):
+        """The menu's selection. topk: the first menu_size. wta: scores normalised against the winner (softmax over
+        log scores); only items holding at least menu_floor of the total survive, up to menu_size."""
+        if self.menu_rule != "wta" or not items:
+            return items[:self.menu_size]
+        z = np.log(np.maximum(np.array([score(c) for c in items], float), 1e-12))
+        w = np.exp(z - z.max())
+        w /= w.sum()
+        order = np.argsort(-w, kind="stable")
+        return [items[i] for i in order if w[i] >= self.menu_floor][:self.menu_size]
 
     # ---------------------------------------------------------------- tools
     def _whole(self, pre, p, text, lines, full, mode):
@@ -358,40 +433,44 @@ class Reader:
         for ev in [e for e in self.events if e["path"] == p and "menu" not in e]:
             self._finalize(ev)
         if full <= self.full_below:
+            self.last[p] = dict(mode="whole", tokens=full, rows=[])
             return self._whole(pre, p, text, lines, full, "whole")
         syms = self._symbols(text, p)
         X, _ = self._features(p, syms, lines, query, changed)
         P = self.model.prob(X)
-        cop_order = []
+        cop_order, pcop = [], {}
         if self.coproc is not None:
             leaf, pc = self._semantic(p, lines, syms, X, query, snapshot, qvec)
+            pcop = {k: float(v) for k, v in zip(leaf, pc)}
             P = np.array(P, float)
             P[leaf] = 1 - (1 - P[leaf]) * (1 - np.asarray(pc, float))   # additive: either one can include a body
             cop_order = [leaf[i] for i in np.argsort(-np.asarray(pc, float), kind="stable")]
             if self.mmr_beta > 0:
                 cop_order = self._mmr(p, lines, syms, leaf, pc, cop_order)
         head = outline(text, p, syms)
-        inc, taken = [False] * len(syms), []
+        inc, taken, cause = [False] * len(syms), [], [""] * len(syms)
         if self.policy == "rule_ab":
             leaf = [k for k, s in enumerate(syms) if not s.children]
             cost = [tokens("\n".join(lines[syms[k].start - 1:syms[k].end])) for k in leaf]
             pick = rule_ab(dict(cost=cost, out_tok=tokens(head), file_tok=full), [P[k] for k in leaf],
                            effective_turn(self.ctx_base + self.served, self.h_rem))
             if pick is None:
+                self.last[p] = dict(mode="bypass", tokens=full, rows=[])
                 return self._whole(pre, p, text, lines, full, "bypass")
             for i in pick:
                 inc[leaf[i]] = True
+                cause[leaf[i]] = "rule_ab"
                 taken.append((syms[leaf[i]].start, syms[leaf[i]].end))
         else:
-            budget, used = max(self.budget_min, self.budget_frac * full), 0
+            budget, used, tau = max(self.budget_min, self.budget_frac * full), 0, self.tau_now()
             for k in sorted(range(len(syms)), key=lambda k: -P[k]):
                 s = syms[k]
-                if P[k] < self.tau or s.children:
+                if P[k] < tau or s.children:
                     continue
                 cost = tokens("\n".join(lines[s.start - 1:s.end]))
                 if used + cost > budget or any(not (s.end < a or s.start > b) for a, b in taken):
                     continue
-                inc[k], used = True, used + cost
+                inc[k], used, cause[k] = True, used + cost, "budget"
                 taken.append((s.start, s.end))
         # the coprocessor's own pick: its top-ranked symbols go up front when small, whatever the thresholds say (its
         # calibrated probabilities are honest but low, ~1-2 needed of 100+ symbols, so a threshold never lets it act)
@@ -400,13 +479,22 @@ class Reader:
             if inc[k] or any(not (s.end < a or s.start > b) for a, b in taken):
                 continue
             if tokens("\n".join(lines[s.start - 1:s.end])) <= self.coproc_max:
-                inc[k] = True
+                inc[k], cause[k] = True, "coproc_top"
                 taken.append((s.start, s.end))
         parts = [head]
         st = self._state(p, lines, syms)
         st["shown"] = set()
+        self.reads += 1
         for a, b in sorted(taken):
-            parts.append(f"--- lines {a}-{b} ---\n" + numbered(lines, a, b))
+            body = numbered(lines, a, b)
+            h = hash(body)
+            seen = self.live.get((p, a, b)) if self.refractory else None
+            if seen is not None and seen[1] == h:              # refractory: already in context, unchanged
+                parts.append(f"--- lines {a}-{b}: unchanged since read #{seen[0]} above ---")
+            else:
+                parts.append(f"--- lines {a}-{b} ---\n" + body)
+                if self.refractory:
+                    self.live[(p, a, b)] = (self.reads, h)
             st["shown"].update(range(a, b + 1))
             self._remember(idents("\n".join(lines[a - 1:b])), 0.5)
             self._touch(p, a, b, 0.5)
@@ -420,6 +508,10 @@ class Reader:
             parts.append("[connected] symbols in neighbouring files; pull with cortex_approve(ids) instead of reading "
                          "those files:\n" + "\n".join(menu))
         out = "\n".join(parts)
+        self.last[p] = dict(mode="outline", tokens=full, shown=tokens(out), policy=self.policy, tau=self.tau_now(),
+                            menu=len(menu), rows=[dict(name=s.name, start=s.start, end=s.end, p=float(P[k]),
+                                                       pc=pcop.get(k), included=inc[k], cause=cause[k])
+                                                  for k, s in enumerate(syms) if not s.children])
         self._log(op="read", path=p, file_tokens=full, shown_tokens=tokens(out), mode="outline", included=sum(inc),
                   symbols=len(syms), menu=len(menu), menu_tokens=tokens("\n".join(menu)) if menu else 0)
         self.served += tokens(out)

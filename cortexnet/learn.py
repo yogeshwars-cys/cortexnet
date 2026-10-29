@@ -79,26 +79,37 @@ def featurize(syms, lines, query, changed, asked, trail=None, active=(), key=Non
 
 
 class IncludeModel:
-    def __init__(self, path=None, lr=0.1, horizon=10):
-        self.path, self.lr, self.horizon = path, lr, horizon
+    """rule "logistic": plain online logistic steps. rule "nlms": each weight's step is divided by the running mean
+    square of its own feature (a local, per-synapse statistic, as in normalised LMS), so features on very different
+    scales (0/1 flags next to log sizes and depths) learn at comparable speed."""
+
+    def __init__(self, path=None, lr=0.1, horizon=10, rule="logistic", power_rate=0.05):
+        self.path, self.lr, self.horizon, self.rule, self.power_rate = path, lr, horizon, rule, power_rate
         self.w = np.array([PRIOR.get(f, 0.0) for f in FEATURES], np.float64)
         self.b, self.updates = -3.0, 0
+        self.power = np.ones(len(FEATURES))
         if path and os.path.exists(path):
             st = json.load(open(path, encoding="utf8"))
             if st.get("features") == FEATURES:
                 self.w, self.b, self.updates = np.array(st["w"]), st["b"], st["updates"]
+                if "power" in st:
+                    self.power = np.array(st["power"])
 
     def prob(self, X):
         return 1 / (1 + np.exp(-(X @ self.w + self.b)))
 
     def update(self, X, y):
         g = np.asarray(y, float) - self.prob(X)
-        self.w += self.lr * (g @ X) / len(y)
+        step = (g @ X) / len(y)
+        if self.rule == "nlms":
+            self.power += self.power_rate * ((X * X).mean(0) - self.power)
+            step = step / (self.power + 0.05)
+        self.w += self.lr * step
         self.b += self.lr * g.mean()
         self.updates += 1
 
     def save(self):
         if self.path:
             os.makedirs(os.path.dirname(self.path), exist_ok=True)
-            json.dump({"features": FEATURES, "w": self.w.tolist(), "b": self.b, "updates": self.updates},
-                      open(self.path, "w", encoding="utf8"), indent=1)
+            json.dump({"features": FEATURES, "w": self.w.tolist(), "b": self.b, "updates": self.updates,
+                       "power": self.power.tolist()}, open(self.path, "w", encoding="utf8"), indent=1)

@@ -106,6 +106,27 @@ class Coprocessor:
     def _embed(self, texts):
         return np.asarray(self.encoder(texts), np.float32) if texts else np.zeros((0, self.dim), np.float32)
 
+    def _embed_query(self, texts, cap=512):
+        """Query-side texts (prompt, snapshot, trail) through a cache: a turn's reads share the request and the trail,
+        and the user extract primes the request before the first read. Missing texts are encoded in one batch."""
+        cache = self.__dict__.setdefault("qcache", {})
+        new = list(dict.fromkeys(t for t in texts if t not in cache))
+        if new:
+            for t, v in zip(new, self._embed(new)):
+                cache[t] = v
+            while len(cache) > cap:
+                cache.pop(next(iter(cache)))
+        return np.stack([cache[t] for t in texts]) if texts else np.zeros((0, self.dim), np.float32)
+
+    def prime(self, prompt):
+        """Encode a request ahead of the reads that will use it (the texts views() derives from a prompt with no
+        snapshot yet). Returns how many texts were new."""
+        q = (prompt or "").strip()
+        texts = [t for t in dict.fromkeys((q[:1200], q[:600].strip(), " ")) if t]
+        before = len(self.__dict__.get("qcache", {}))
+        self._embed_query(texts)
+        return len(self.qcache) - before
+
     def symbol_vectors(self, path, lines, syms):
         """[n, M, d] sub-span vectors of the symbols (zero rows for empty sub-spans), via the code cache."""
         texts = [[t.strip() for t in subspans(s, lines, path)] for s in syms]
@@ -144,7 +165,7 @@ class Coprocessor:
         """trail: [(weight, text)] of recently touched symbols, newest first (the cache context)."""
         q, h = (prompt or "").strip(), (snapshot or "").strip()
         texts = [q[:1200], h[-1200:], (q[:600] + "\n" + h[-600:]).strip()] + [t for _, t in trail]
-        E = self._embed([t if t else " " for t in texts])
+        E = self._embed_query([t if t else " " for t in texts])
         eq, eh, eqh = (E[0] if q else 0 * E[0]), (E[1] if h else 0 * E[1]), (E[2] if q or h else 0 * E[2])
         if qvec is not None:
             eqh = np.asarray(qvec, np.float32) / max(float(np.linalg.norm(qvec)), 1e-12)

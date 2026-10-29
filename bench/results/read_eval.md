@@ -1,6 +1,6 @@
 # Offline read evaluation: SWE-bench Lite read cases
 
-139 read_file cases from the Glimmer A/B episodes (107 with gold-patch lines in the read file), one read each, query = issue text, snapshot = the agent's reasoning before the read. Coprocessor head `head_minilm_c64_v2.npz` (trained without SWE data). (352s)
+139 read_file cases from the Glimmer A/B episodes (107 with gold-patch lines in the read file), one read each, query = issue text, snapshot = the agent's reasoning before the read. Coprocessor head `head_minilm_c64_v2.npz` (trained without SWE data). (475s)
 
 | configuration | gold-line recall (mean) | reads with all gold lines visible | needed symbol visible | tokens per read (mean) | share of the whole file (median) |
 |---|---|---|---|---|---|
