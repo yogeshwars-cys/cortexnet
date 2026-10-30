@@ -1,4 +1,24 @@
+<p align="center">
+  <img src="docs/readme/cortex_character.png" width="900"
+       alt="Cortex: a pixel-art brain in green, lime and yellow beside the CORTEX wordmark and the line 'outline-first context for coding agents'">
+</p>
+
 # CortexNET
+
+<p align="center">
+  <img src="docs/readme/hero.png" width="900"
+       alt="CortexNET gives a coding agent the outline of a file and only the code its next step needs. Results: Muse Spark 1.3, $0.18 vs $1.91 for a 20-question session at 20/20 correct (whole-file reads 19/20); Muse Spark Open, 48% vs 30% gold symbol on SWE-bench Lite (7 won, 0 lost, p = 0.02); Llama 3.1 8B, 13/20 vs 0/20 in one 8k session on a 6 GB laptop GPU; Muse Glimmer 30B, 0.42x prefill tokens on SWE-bench Lite with the same task success. Ships as an MCP server, an egress proxy and Cortex CLI.">
+</p>
+
+<p align="center">
+  <img src="docs/readme/architecture.png" width="900"
+       alt="Architecture: a coding agent (Cortex CLI, Claude Code, Codex or any MCP client) reaches CortexNET through its MCP server or through an egress proxy on its model API traffic. Both send reads to the outline-first reader, which reads the repository, takes its body picks from an include model that learns from the reader's misses, and is warmed by a spiking file manager. A watermark fade shrinks the agent's history from 85% to 50% of the context in one batch. The proxy forwards the traffic to the model API (Meta API, Baseten, Modal vLLM, llama.cpp).">
+</p>
+
+<p align="center">
+  <img src="docs/readme/workflow.png" width="900"
+       alt="One turn in Cortex CLI: a request warms the named and predicted files; the model turn calls a tool; the outline-first read returns the outline and the picked bodies. If a needed body is missing, a range read fetches it and is logged as a miss that trains the include model. The fade then runs if the context is above 85%, and the next turn starts, until the model answers.">
+</p>
 
 A coding agent normally pulls whole files into its context. CortexNET sits between the agent and the code so it works
 from a fraction of that context, with the same or better answers: a small local model on a 6 GB laptop GPU gets
@@ -13,6 +33,27 @@ through a long coding session, and hosted models do the same work for a fraction
 
 It ships as an MCP server, an egress proxy in front of any agent (Claude Code, Codex), and Cortex CLI, a terminal
 coding agent built around it (task card, scouts, a spiking file manager that warms the files the model will want).
+
+## Meta Global AI Developer Hackathon
+
+**Track: Push the Frontier (software).** CortexNET gives a coding agent a capability it lacks: working through a
+repository from a small context window, so an open model on a laptop GPU or a cheap hosted call finishes work that
+otherwise overflows the context or costs ten times more.
+
+**Meta models, and where each one runs:**
+
+| model | served by | used for |
+|---|---|---|
+| Muse Spark 1.3 | Meta Model API (`--meta`, Anthropic-compatible endpoint) | session A/B, SWE-bench Lite, Claude Code through the proxy |
+| Muse Spark Open (`meta-models/muse-spark-open-1026`) | Baseten | session A/B, SWE-bench Lite (`bench/swe_api.py --baseten`) |
+| Muse Glimmer 30B (open weights) | our own H100s on Modal (`bench/modal_glimmer.py`) | SWE-bench Lite agent A/B, read-time probes |
+| Llama 3.3 70B, Llama 4 Maverick | vLLM on Modal H200s (`bench/modal_vllm.py`) | SWE-bench Lite |
+| Llama 3.1 8B Instruct | llama.cpp on a 6 GB laptop GPU | session A/B at 8k context |
+
+**What was built during the hackathon: all of it.** Every file in this repository was written in the building period
+(27 Oct to 4 Nov 2026); the first commit is dated 27 Oct and `git log` shows each step since. Used, not written here:
+numpy, Rich and prompt_toolkit (CLI), llama.cpp and vLLM (serving), MiniLM (an optional coprocessor encoder) and the
+public SWE-bench Lite tasks.
 
 ## Results
 
@@ -296,6 +337,8 @@ rewriting, for A/B baselines. Logs usage numbers only, never request bodies.
 | `bench/shell_eval.py`, `bench/replay_edits.py`, `bench/replay_sessions.py` | offline studies over local session logs (aggregates only) |
 | `bench/results/` | result tables (`debut.md`: the Meta and Llama 3.3 70B runs) |
 | `docs/coprocessor.md` | the experimental learned body picker (Cortex-SubNN), symbol graph and menu, and their studies |
+| `docs/readme/` | the README art; `src/` holds the HTML sources and `render.py`, which renders them to PNG with Chrome |
+| `scripts/make_banner.py` | builds the CLI's pixel-art logo (`cortexnet/assets/brain.ans`) from `docs/cortex_logo.png` |
 | `tests/` | `python -m pytest -q` (or `python -m unittest discover -s tests`) |
 
 ## Data
@@ -303,3 +346,9 @@ rewriting, for A/B baselines. Logs usage numbers only, never request bodies.
 Benchmarks read your own local agent logs. Those contain file contents and prompts: they are never copied into this
 repo, and the scripts only write aggregate numbers. The live A/B and SWE-bench fixtures use only this repo's code, the
 Python standard library and public SWE-bench Lite tasks.
+
+## License
+
+Source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE.md): you may read, run, modify and share
+CortexNET for any noncommercial purpose (personal use, research, evaluation, teaching). Commercial use needs a separate
+license from the author; open an issue or contact [@yogeshwars-cys](https://github.com/yogeshwars-cys).

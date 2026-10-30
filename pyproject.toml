@@ -3,6 +3,7 @@ name = "cortexnet"
 version = "0.1.0"
 description = "Outline-first file reads and watermark fading for coding agents: the same work from a fraction of the context"
 requires-python = ">=3.10"
+license = { file = "LICENSE.md" }   # PolyForm Noncommercial 1.0.0
 dependencies = ["numpy"]
 
 [project.scripts]
