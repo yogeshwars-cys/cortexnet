@@ -10,7 +10,7 @@ import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT = os.path.dirname(HERE)
-PAGES = {"hero": (960, 424), "architecture": (1040, 720), "deployments": (1040, 664), "workflow": (1040, 600)}   # CSS px; each page fixes its body to this
+PAGES = {"hero": (960, 424), "architecture": (1040, 720), "deployments": (1040, 664), "components": (1040, 600), "workflow": (1040, 600)}   # CSS px; each page fixes its body to this
 BROWSERS = [r"C:\Program Files\Google\Chrome\Application\chrome.exe",
             r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe", "google-chrome", "chromium"]
 

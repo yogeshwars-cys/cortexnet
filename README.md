@@ -16,6 +16,11 @@
 </p>
 
 <p align="center">
+  <img src="docs/readme/components.png" width="900"
+       alt="Where CortexNET sits: a coding agent (Cortex CLI, Claude Code, Codex, any MCP client) reaches CortexNET through its MCP server or an egress proxy on its model API traffic; both send reads to the outline-first reader, which reads the repository, takes its body picks from an include model that learns from the reader's misses, and is warmed by a spiking file manager. A watermark fade shrinks the agent's history from 85% to 50% in one batch. The proxy forwards the traffic to the model API (Meta API, Baseten, Modal cloud GPUs). Locally, your own loop calls the reader directly through the Python library.">
+</p>
+
+<p align="center">
   <img src="docs/readme/deployments.png" width="900"
        alt="Local and external. Local, CortexNET next to llama.cpp on a 6 GB laptop GPU: the context window, KV-cache memory and prefill time run out (6.14 GB holds 4.4 GB of weights, 1.0 GB of KV cache for 8k and 0.4 GB of compute, so the window stays at 8k). CortexNET puts about a third of the file text in context, fades against the window the server reports, and keeps the history append-only between fades. Measured: Llama 3.1 8B, 13/20 over 20 questions in one 8k session vs 0/20 with whole files, which overflowed on question 1; peak context 6,768 of 8,192 with 24 reads faded. External, API and cloud through Cortex CLI, the egress proxy or the MCP server: input tokens billed on every turn and the context ceiling run out; CortexNET rewrites a read only when it is fresh and replays it byte for byte so the prefix cache keeps matching. Measured: Muse Spark 1.3 on the Meta Model API, $0.18 vs $1.91 for a 20-question session; Muse Spark Open on Baseten, 48% vs 30% SWE-bench Lite gold symbol (p = 0.02); Muse Glimmer 30B on a cloud H100, 0.59x peak KV cache and 0.42x prefill; Llama 4 Maverick on 4 cloud H200s, 0.40x peak context and 0.31x file tokens. Where it pays least: short tasks on a prompt-cached API.">
 </p>
