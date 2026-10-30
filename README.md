@@ -7,17 +7,22 @@
 
 <p align="center">
   <img src="docs/readme/hero.png" width="900"
-       alt="CortexNET gives a coding agent the outline of a file and only the code its next step needs. Results: Muse Spark 1.3, $0.18 vs $1.91 for a 20-question session at 20/20 correct (whole-file reads 19/20); Muse Spark Open, 48% vs 30% gold symbol on SWE-bench Lite (7 won, 0 lost, p = 0.02); Llama 3.1 8B, 13/20 vs 0/20 in one 8k session on a 6 GB laptop GPU; Muse Glimmer 30B, 0.42x prefill tokens on SWE-bench Lite with the same task success. Ships as an MCP server, an egress proxy and Cortex CLI.">
+       alt="CortexNET gives a coding agent the outline of a file and only the code its next step needs. It sits between any coding agent and any model: on your own GPU it keeps a long session inside a small context window; on a hosted API it cuts the tokens you pay for. Results: Muse Spark 1.3, $0.18 vs $1.91 for a 20-question session at 20/20 correct (whole-file reads 19/20); Muse Spark Open, 48% vs 30% gold symbol on SWE-bench Lite (7 won, 0 lost, p = 0.02); Llama 3.1 8B, 13/20 vs 0/20 in one 8k session on a 6 GB laptop GPU; Muse Glimmer 30B, 0.42x prefill tokens on SWE-bench Lite with the same task success. Ways in: MCP server, egress proxy, Python library, Cortex CLI.">
 </p>
 
 <p align="center">
   <img src="docs/readme/architecture.png" width="900"
-       alt="Architecture: a coding agent (Cortex CLI, Claude Code, Codex or any MCP client) reaches CortexNET through its MCP server or through an egress proxy on its model API traffic. Both send reads to the outline-first reader, which reads the repository, takes its body picks from an include model that learns from the reader's misses, and is warmed by a spiking file manager. A watermark fade shrinks the agent's history from 85% to 50% of the context in one batch. The proxy forwards the traffic to the model API (Meta API, Baseten, Modal vLLM, llama.cpp).">
+       alt="The CortexNET stack. Agents: Claude Code, Codex, Antigravity, any MCP client, your own loop, Cortex CLI. Ways in: the MCP server (cortex_read, cortex_range, cortex_outline), the egress proxy (swaps whole-file reads in the agent's API traffic, no tool changes), the Python library (Reader and watermark_fade in your own loop), and Cortex CLI with all of it built in. The core: reads (outline plus the bodies an include model picks, small files whole, an optional cost rule for prefix-cached APIs), context (watermark fade from 85% to 50% in one batch, in Cortex CLI and your own loop), anticipation (a spiking file manager predicts the next files, which the CLI parses ahead), and learning (every range read is a miss that trains the include model, kept across sessions). Models: your hardware (llama.cpp, vLLM, transformers, from a 6 GB laptop GPU to 4x H200; it runs out of context window, KV-cache memory and prefill compute) or a hosted API (Meta Model API, Baseten, any OpenAI- or Anthropic-compatible endpoint; it runs out of input tokens billed on every turn and the context ceiling). The core never calls the model.">
+</p>
+
+<p align="center">
+  <img src="docs/readme/deployments.png" width="900"
+       alt="Two ways to run it. On your own hardware, the context window, KV-cache memory and prefill compute run out; CortexNET keeps file text to a third and fades against the window the server reports, with an append-only history between fades so the prefix cache keeps working. Measured: Llama 3.1 8B on a 6 GB laptop, 13/20 in one 8k session vs 0/20 with whole files, which overflowed on question 1; Muse Glimmer 30B on an H100, 0.59x peak KV cache and 0.42x prefill at the same success; Llama 4 Maverick on 4x H200, 0.40x peak context and 0.31x file tokens. On a hosted API, input tokens billed on every turn and the context ceiling run out; CortexNET rewrites a read only when it is fresh and replays it byte for byte so the provider's prefix cache keeps matching, with an optional rule that weighs a round trip against tokens re-read from cache. Measured: Muse Spark 1.3, $0.18 vs $1.91 for a 20-question session; Muse Spark Open, 48% vs 30% gold symbol on SWE-bench Lite (p = 0.02); Muse Spark 1.3, 0.61x SWE-bench cost ($0.132 vs $0.217 per task). Where it pays least: short tasks on a prompt-cached API.">
 </p>
 
 <p align="center">
   <img src="docs/readme/workflow.png" width="900"
-       alt="One turn in Cortex CLI: a request warms the named and predicted files; the model turn calls a tool; the outline-first read returns the outline and the picked bodies. If a needed body is missing, a range read fetches it and is logged as a miss that trains the include model. The fade then runs if the context is above 85%, and the next turn starts, until the model answers.">
+       alt="One read through CortexNET, the same behind the MCP server, the proxy, Cortex CLI and the Python library. A file read arrives from any way in; CortexNET returns the outline and the bodies its include model picks. The agent works with it. If it needs a body it was not shown, a range read returns those lines and is logged as a miss that trains the include model for the next read. Otherwise the watermark fade shrinks the history at 85% down to 50% (in Cortex CLI and your own loop), and the next turn starts. In Cortex CLI a spiking file manager warms the next files ahead of the read.">
 </p>
 
 A coding agent normally pulls whole files into its context. CortexNET sits between the agent and the code so it works
@@ -31,8 +36,10 @@ through a long coding session, and hosted models do the same work for a fraction
   of the context, then one batch shrinks stale reads, oldest first, to 50%: superseded copies of a file become a
   pointer, stale reads become their outline or a pointer.
 
-It ships as an MCP server, an egress proxy in front of any agent (Claude Code, Codex), and Cortex CLI, a terminal
-coding agent built around it (task card, scouts, a spiking file manager that warms the files the model will want).
+It works with any agent and any model, local or hosted, through four ways in: an MCP server, an egress proxy in front
+of any agent (Claude Code, Codex, Antigravity), a Python library for your own agent loop (`Reader`,
+`cortexnet.fade.watermark_fade`), and Cortex CLI, a terminal coding agent built around it (task card, scouts, a spiking
+file manager that warms the files the model will want).
 
 ## Meta Global AI Developer Hackathon
 

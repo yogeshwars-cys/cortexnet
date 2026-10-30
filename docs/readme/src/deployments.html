@@ -1,0 +1,96 @@
+<!doctype html>
+<!-- README: CortexNET on your own hardware vs on a hosted API. Rendered to docs/readme/deployments.png by render.py (1040 x 624 CSS px at 2x). -->
+<html lang="en" style="color-scheme: dark">
+<head>
+<meta charset="utf-8">
+<title>Local and hosted</title>
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --paper: #121612; --ink: #eef3e4; --muted: #a9b39c; --soft: #7d8873;
+    --green: #2fae5c; --lime: #a8e22a; --yellow: #eef35a; --rule: rgba(238, 243, 228, 0.12);
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { width: 1040px; height: 624px; background: transparent; overflow: hidden; }
+  body { font-family: 'Geist', 'Segoe UI', sans-serif; color: var(--ink); -webkit-font-smoothing: antialiased; }
+  .card { position: relative; width: 1040px; height: 624px; border-radius: 16px; overflow: hidden; padding: 32px; background: var(--paper); }
+  .glow { position: absolute; border-radius: 50%; filter: blur(90px); }
+  .g1 { left: -160px; top: -200px; width: 600px; height: 420px; background: var(--green); opacity: 0.22; }
+  .g2 { right: -160px; top: -200px; width: 560px; height: 400px; background: var(--yellow); opacity: 0.10; }
+  .card::after { content: ""; position: absolute; inset: 0; border-radius: 16px; padding: 1px;
+    background: linear-gradient(120deg, rgba(47,174,92,0.8), rgba(168,226,42,0.3) 50%, rgba(238,243,90,0.25));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; }
+  .content { position: relative; }
+  h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; text-wrap: balance; }
+  .caption { margin-top: 8px; font-size: 14px; color: var(--muted); }
+
+  .cols { margin-top: 24px; display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .col { border-radius: 10px; border: 1px solid var(--rule); background: rgba(24,32,24,0.7); padding: 20px 20px 16px; }
+  .col.local { border-top: 3px solid var(--green); }
+  .col.hosted { border-top: 3px solid var(--yellow); }
+  .col h2 { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+  .col .where { margin-top: 4px; font: 400 12px 'Geist Mono', Consolas, monospace; color: var(--soft); }
+
+  .row { margin-top: 16px; display: grid; grid-template-columns: 96px 1fr; gap: 12px; }
+  .k { font: 500 12px/1.5 'Geist Mono', Consolas, monospace; color: var(--soft); padding-top: 1px; }
+  .v { font-size: 13px; line-height: 1.5; color: var(--muted); }
+  .v b { color: var(--ink); font-weight: 500; }
+
+  .m { display: grid; grid-template-columns: 112px 1fr; gap: 4px 12px; align-items: baseline; }
+  .n { font: 600 18px 'Geist Mono', Consolas, monospace; letter-spacing: -0.02em; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .local .n { color: var(--lime); }
+  .hosted .n { color: var(--yellow); }
+  .m .d { font-size: 13px; line-height: 1.45; color: var(--muted); }
+  .m .d b { color: var(--ink); font-weight: 500; }
+
+  .caveat { margin-top: 16px; font-size: 13px; line-height: 1.5; color: var(--muted); }
+  .caveat b { color: var(--ink); font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="glow g1"></div><div class="glow g2"></div>
+  <div class="content">
+    <h1>Two ways to run it</h1>
+    <p class="caption">The same reads and fade, aimed at whatever runs out first. Every arm keeps the model fixed and changes only the read tool.</p>
+
+    <div class="cols">
+      <div class="col local">
+        <h2>On your own hardware</h2>
+        <p class="where">llama.cpp, vLLM or transformers; a laptop GPU or rented H100s and H200s</p>
+        <div class="row"><p class="k">runs out of</p>
+          <p class="v">the <b>context window</b> (8k on a 6 GB GPU), <b>KV-cache memory</b> and <b>prefill compute</b></p></div>
+        <div class="row"><p class="k">cortexnet</p>
+          <p class="v">keeps file text to a third and fades against the window the server reports, so a long session fits; the
+            history stays append-only between fades, so the server's prefix cache keeps working</p></div>
+        <div class="row"><p class="k">measured</p>
+          <div class="m">
+            <p class="n">13/20</p><p class="d"><b>Llama 3.1 8B</b>, 6 GB laptop, one 8k session; whole files: 0/20, overflowed on question 1</p>
+            <p class="n">0.59x</p><p class="d"><b>Muse Glimmer 30B</b>, H100: peak KV cache; 0.42x prefill, same success</p>
+            <p class="n">0.40x</p><p class="d"><b>Llama 4 Maverick</b>, 4x H200: peak context; 0.31x file tokens</p>
+          </div></div>
+      </div>
+
+      <div class="col hosted">
+        <h2>On a hosted API</h2>
+        <p class="where">Meta Model API, Baseten, any OpenAI- or Anthropic-compatible endpoint</p>
+        <div class="row"><p class="k">runs out of</p>
+          <p class="v"><b>input tokens</b>, billed again on every turn, and the <b>context ceiling</b> on long tasks</p></div>
+        <div class="row"><p class="k">cortexnet</p>
+          <p class="v">rewrites a read only when it is fresh and replays it byte for byte, so the provider's prefix cache keeps
+            matching; an optional rule weighs a round trip against tokens re-read from cache</p></div>
+        <div class="row"><p class="k">measured</p>
+          <div class="m">
+            <p class="n">$0.18</p><p class="d"><b>Muse Spark 1.3</b>, 20-question session, 20/20; whole files: $1.91, 19/20</p>
+            <p class="n">48%</p><p class="d"><b>Muse Spark Open</b>, SWE-bench Lite gold symbol; whole files: 30%, p = 0.02</p>
+            <p class="n">0.61x</p><p class="d"><b>Muse Spark 1.3</b>, SWE-bench Lite cost: $0.132 vs $0.217 per task</p>
+          </div></div>
+      </div>
+    </div>
+
+    <p class="caveat"><b>Where it pays least:</b> short tasks on a prompt-cached API. There a whole file is paid once and re-read at about a
+      tenth of the price, so the extra turns of outline-first reads can cost what the smaller reads save.</p>
+  </div>
+</div>
+</body>
+</html>
