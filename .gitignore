@@ -11,3 +11,8 @@ cortexnet.egg-info/
 .benchmarks/
 .ruff_cache/
 .pytest_cache/
+build/
+.orchestry/
+
+# Orchestry state
+.orchestry

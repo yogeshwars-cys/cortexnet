@@ -47,6 +47,31 @@ through **Cortex CLI**, a terminal coding agent made to be tested on API and clo
 file manager that warms the files the model will want), an egress proxy in front of any agent (Claude Code, Codex,
 Antigravity) and an MCP server for any MCP client.
 
+## Try it: one command each
+
+Needs [uv](https://docs.astral.sh/uv/getting-started/installation/) (or swap `uvx --from X` for `pipx run --spec X`).
+Run them inside any repository: that is the code they read.
+
+```
+# No model, no key: what CortexNET's first read of each source file shows, against reading the whole file
+uvx --from git+https://github.com/yogeshwars-cys/cortexnet cortexnet try
+
+# Local CortexNET: downloads llama.cpp and Llama 3.1 8B Instruct (Q4_K_M, ~4.9 GB) once, starts it with an 8k
+# context on your GPU, then you ask questions about the repository in one session
+uvx --from git+https://github.com/yogeshwars-cys/cortexnet cortexnet local
+
+# External sources, Cortex CLI: Muse Spark 1.3 on the Meta Model API (key in LLAMA_API_KEY) ...
+uvx --from git+https://github.com/yogeshwars-cys/cortexnet cortex --api anthropic --base https://api.meta.ai --model muse-spark-1.3 --key-env LLAMA_API_KEY
+# ... or Muse Spark Open on Baseten (key in BASETEN_API_KEY)
+uvx --from git+https://github.com/yogeshwars-cys/cortexnet cortex --api openai --base https://inference.baseten.co/v1 --model meta-models/muse-spark-open-1026 --key-env BASETEN_API_KEY
+```
+
+`cortexnet local` uses llama.cpp's Vulkan build on Windows and Linux (NVIDIA, AMD and Intel GPUs, no CUDA install)
+and Metal on Apple silicon; `--cpu` runs without a GPU, `--gguf PATH` uses a model file you already have, `--server URL`
+a server you already run. After each answer it prints the context in use, the reads faded and the file tokens shown
+against whole-file reads. Downloads go to `$CORTEXNET_HOME` (default: your user cache dir). The first answer waits for
+the GPU to warm up (about a minute on the 6 GB laptop); later ones take seconds.
+
 ## Meta Global AI Developer Hackathon
 
 **Track: Push the Frontier (software).** CortexNET gives a coding agent a capability it lacks: working through a
@@ -340,6 +365,7 @@ rewriting, for A/B baselines. Logs usage numbers only, never request bodies.
 | `cortexnet/fade.py` | fade on a watermark for an agent's message history |
 | `cortexnet/filesnn.py` | spiking file manager: which files to warm next |
 | `cortexnet/shellout.py` | outlines of long shell outputs (opt-in in the proxy) |
+| `cortexnet/local.py` | `cortexnet try` and `cortexnet local`: the one-command paths (llama.cpp download, question-and-answer session) |
 | `cortexnet/cli.py`, `cortexnet/cli_ui.py` | Cortex CLI: the terminal coding agent and its UI (Rich + prompt_toolkit, plain fallback) |
 | `cortexnet/card.py`, `cortexnet/prefetch.py`, `cortexnet/extract.py` | Cortex CLI's task card, prefetcher and symbol index, user extract |
 | `cortexnet/mcp_server.py` | minimal MCP server (JSON-RPC over stdio) |

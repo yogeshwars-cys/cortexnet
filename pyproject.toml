@@ -4,12 +4,13 @@ version = "0.1.0"
 description = "Outline-first file reads and watermark fading for coding agents: the same work from a fraction of the context"
 requires-python = ">=3.10"
 license = { file = "LICENSE.md" }   # PolyForm Noncommercial 1.0.0
-dependencies = ["numpy"]
+dependencies = ["numpy", "rich", "prompt_toolkit"]
 
 [project.scripts]
 cortexnet-mcp = "cortexnet.mcp_server:main"
 cortexnet-proxy = "cortexnet.proxy:main"
 cortex = "cortexnet.cli:main"
+cortexnet = "cortexnet.local:main"
 
 [build-system]
 requires = ["setuptools>=61"]
