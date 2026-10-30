@@ -1,9 +1,9 @@
 <!doctype html>
-<!-- README architecture: the CortexNET stack. Rendered to docs/readme/architecture.png by render.py (1040 x 664 CSS px at 2x). -->
+<!-- README architecture: one CortexNET core, local and external sides. Rendered to docs/readme/architecture.png by render.py (1040 x 720 CSS px at 2x). -->
 <html lang="en" style="color-scheme: dark">
 <head>
 <meta charset="utf-8">
-<title>The CortexNET stack</title>
+<title>CortexNET architecture</title>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -11,95 +11,98 @@
     --green: #2fae5c; --lime: #a8e22a; --yellow: #eef35a; --rule: rgba(238, 243, 228, 0.12);
   }
   * { box-sizing: border-box; margin: 0; }
-  html, body { width: 1040px; height: 664px; background: transparent; overflow: hidden; }
+  html, body { width: 1040px; height: 720px; background: transparent; overflow: hidden; }
   body { font-family: 'Geist', 'Segoe UI', sans-serif; color: var(--ink); -webkit-font-smoothing: antialiased; }
-  .card { position: relative; width: 1040px; height: 664px; border-radius: 16px; overflow: hidden; padding: 32px; background: var(--paper); }
-  .card::before { content: ""; position: absolute; left: -200px; top: -220px; width: 640px; height: 440px; border-radius: 50%;
-    background: var(--green); opacity: 0.22; filter: blur(90px); }
+  .card { position: relative; width: 1040px; height: 720px; border-radius: 16px; overflow: hidden; padding: 32px; background: var(--paper); }
+  .glow { position: absolute; border-radius: 50%; filter: blur(90px); }
+  .g1 { left: -180px; top: -200px; width: 600px; height: 420px; background: var(--green); opacity: 0.22; }
+  .g2 { right: -160px; top: -200px; width: 560px; height: 400px; background: var(--yellow); opacity: 0.10; }
   .card::after { content: ""; position: absolute; inset: 0; border-radius: 16px; padding: 1px;
-    background: linear-gradient(120deg, rgba(47,174,92,0.8), rgba(168,226,42,0.3) 50%, rgba(238,243,228,0.08));
+    background: linear-gradient(120deg, rgba(47,174,92,0.8), rgba(168,226,42,0.3) 50%, rgba(238,243,90,0.25));
     -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; }
   .content { position: relative; }
   h1 { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; text-wrap: balance; }
   .caption { margin-top: 8px; font-size: 14px; color: var(--muted); }
 
-  .stack { margin-top: 24px; display: grid; gap: 8px; }
-  .layer { display: grid; grid-template-columns: 120px 1fr; gap: 12px; align-items: stretch; }
-  .lname { padding-top: 12px; font: 500 12px 'Geist Mono', Consolas, monospace; color: var(--soft); }
-  .cells { display: grid; gap: 8px; }
-  .cell { padding: 12px 16px; border-radius: 6px; background: var(--cell); border: 1px solid var(--rule); }
-  .cell h2 { font-size: 15px; font-weight: 600; }
-  .cell p { margin-top: 4px; font: 400 12px/1.5 'Geist Mono', Consolas, monospace; color: var(--muted); }
-  .cell p.limit { color: var(--ink); }
+  .cols { margin-top: 24px; display: grid; grid-template-columns: 1fr 32px 1.02fr 32px 1.3fr; align-items: stretch; }
+  .gut { display: flex; align-items: center; justify-content: center; }
+  .panel { border-radius: 10px; border: 1px solid var(--rule); background: rgba(24,32,24,0.7); padding: 16px; }
+  .panel.local { border-top: 3px solid var(--green); }
+  .panel.ext { border-top: 3px solid var(--yellow); }
+  .head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .panel h2 { font-size: 18px; font-weight: 600; letter-spacing: -0.01em; }
+  .tag { font: 500 12px 'Geist Mono', Consolas, monospace; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--rule); }
+  .local .tag { color: var(--lime); }
+  .ext .tag { color: var(--yellow); }
+  .lede { margin-top: 8px; font-size: 13px; line-height: 1.5; color: var(--muted); }
 
-  .agents .cells { grid-template-columns: repeat(6, 1fr); }
-  .agents .cell { padding: 10px 12px; background: rgba(169,179,156,0.08); text-align: center; font-size: 14px; font-weight: 500; }
-  .ways .cells { grid-template-columns: repeat(4, 1fr); }
+  .k { margin-top: 14px; font: 500 12px 'Geist Mono', Consolas, monospace; color: var(--soft); }
+  .item { margin-top: 6px; padding: 8px 10px; border-radius: 6px; background: var(--cell); border: 1px solid var(--rule); }
+  .item b { display: block; font-size: 14px; font-weight: 600; }
+  .item span { display: block; margin-top: 2px; font: 400 12px/1.45 'Geist Mono', Consolas, monospace; color: var(--muted); }
+  .limit { margin-top: 6px; font: 400 12px/1.5 'Geist Mono', Consolas, monospace; color: var(--ink); }
+  .ways .item b, .ways .item span { display: inline; }
+  .ways .item span { margin-left: 6px; }
 
-  .core .lname { color: var(--lime); }
-  .core .cells { grid-template-columns: 1.15fr 1fr 1fr 1fr; padding: 8px; border-radius: 8px; position: relative;
-    background: rgba(168,226,42,0.07); }
-  .core .cells::before { content: ""; position: absolute; inset: 0; border-radius: 8px; padding: 1.5px;
-    background: linear-gradient(110deg, var(--green), var(--lime) 55%, var(--yellow));
+  .core { position: relative; border-radius: 10px; padding: 16px; background: rgba(168,226,42,0.07); }
+  .core::before { content: ""; position: absolute; inset: 0; border-radius: 10px; padding: 1.5px;
+    background: linear-gradient(160deg, var(--green), var(--lime) 55%, var(--yellow));
     -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0); -webkit-mask-composite: xor; }
-  .core .cell { background: rgba(18,22,18,0.75); }
-
-  .models .cells { grid-template-columns: 1fr 1fr; }
-  .models .cell { background: rgba(238,243,228,0.03); border-color: rgba(238,243,228,0.24); }
-  .models .cell.local { border-left: 3px solid var(--green); }
-  .models .cell.hosted { border-left: 3px solid var(--yellow); }
-
-  .note { margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--rule); font-size: 13px; color: var(--muted); }
-  .note b { color: var(--ink); font-weight: 500; }
+  .core h2 { font-size: 18px; font-weight: 600; }
+  .core .item { background: rgba(18,22,18,0.8); }
+  .core .foot { margin-top: 12px; font-size: 13px; line-height: 1.45; color: var(--muted); }
+  .core .foot b { color: var(--ink); font-weight: 500; }
 </style>
 </head>
 <body>
-<div class="card"><div class="content">
-  <h1>The CortexNET stack</h1>
-  <p class="caption">A context layer between any coding agent and any model, local or hosted. The agent's tools and prompts stay as they are.</p>
+<div class="card">
+  <div class="glow g1"></div><div class="glow g2"></div>
+  <div class="content">
+    <h1>One engine, local or external</h1>
+    <p class="caption">The core decides which file text reaches the model. Locally it runs next to your own model; external sources reach the same core.</p>
 
-  <div class="stack">
-    <div class="layer agents">
-      <p class="lname">agents</p>
-      <div class="cells">
-        <div class="cell">Claude Code</div><div class="cell">Codex</div><div class="cell">Antigravity</div>
-        <div class="cell">any MCP client</div><div class="cell">your own loop</div><div class="cell">Cortex CLI</div>
+    <div class="cols">
+      <div class="panel local">
+        <div class="head"><h2>Local</h2><span class="tag">CortexNET</span></div>
+        <p class="lede">The engine next to a model on your own GPU, inside your own agent loop.</p>
+        <p class="k">way in</p>
+        <div class="item"><b>Python library</b><span>Reader, watermark_fade</span></div>
+        <p class="k">model</p>
+        <div class="item"><b>llama.cpp on the same machine</b><span>tested: Llama 3.1 8B on a 6 GB laptop GPU, 8k context</span></div>
+        <p class="k">runs out of</p>
+        <p class="limit">the context window, KV-cache memory and prefill time</p>
       </div>
-    </div>
 
-    <div class="layer ways">
-      <p class="lname">ways in</p>
-      <div class="cells">
-        <div class="cell"><h2>MCP server</h2><p>cortex_read, cortex_range, cortex_outline tools</p></div>
-        <div class="cell"><h2>Egress proxy</h2><p>swaps whole-file reads in the agent's API traffic; no tool changes</p></div>
-        <div class="cell"><h2>Python library</h2><p>Reader and watermark_fade inside your own agent loop</p></div>
-        <div class="cell"><h2>Built in</h2><p>Cortex CLI, a terminal coding agent with all of it inside</p></div>
+      <div class="gut"><svg width="32" height="16" viewBox="0 0 32 16" aria-hidden="true"><path d="M2 8 H30 M8 3 L2 8 L8 13 M24 3 L30 8 L24 13" fill="none" stroke="#a9b39c" stroke-width="1.2"/></svg></div>
+
+      <div class="core">
+        <h2>CortexNET core</h2>
+        <div class="item"><b>Reads</b><span>outline + the bodies an include model picks; small files whole</span></div>
+        <div class="item"><b>Context</b><span>watermark fade: at 85%, stale reads become outlines, down to 50%, in one batch</span></div>
+        <div class="item"><b>Anticipation</b><span>a spiking file manager predicts the next files</span></div>
+        <div class="item"><b>Learning</b><span>every range read is a miss that trains the include model, kept across sessions</span></div>
+        <p class="foot"><b>It never calls your model.</b> It shapes the reads the model is given.</p>
       </div>
-    </div>
 
-    <div class="layer core">
-      <p class="lname">cortexnet core</p>
-      <div class="cells">
-        <div class="cell"><h2>Reads</h2><p>outline + the bodies an include model picks; small files whole; optional cost rule for prefix-cached APIs</p></div>
-        <div class="cell"><h2>Context</h2><p>watermark fade: at 85% stale reads become outlines, down to 50%, in one batch (CLI, your own loop)</p></div>
-        <div class="cell"><h2>Anticipation</h2><p>spiking file manager predicts the next files; the CLI parses them before they are asked for</p></div>
-        <div class="cell"><h2>Learning</h2><p>every range read is a miss that trains the include model, kept across sessions</p></div>
-      </div>
-    </div>
+      <div class="gut"><svg width="32" height="16" viewBox="0 0 32 16" aria-hidden="true"><path d="M2 8 H30 M8 3 L2 8 L8 13 M24 3 L30 8 L24 13" fill="none" stroke="#a9b39c" stroke-width="1.2"/></svg></div>
 
-    <div class="layer models">
-      <p class="lname">models</p>
-      <div class="cells">
-        <div class="cell local"><h2>Your hardware</h2><p>llama.cpp, vLLM, transformers: a 6 GB laptop GPU up to 4x H200</p>
-          <p class="limit">runs out of: context window, KV-cache memory, prefill compute</p></div>
-        <div class="cell hosted"><h2>Hosted API</h2><p>Meta Model API, Baseten, any OpenAI- or Anthropic-compatible endpoint</p>
-          <p class="limit">runs out of: input tokens billed on every turn, the context ceiling</p></div>
+      <div class="panel ext">
+        <div class="head"><h2>External sources</h2><span class="tag">API and cloud models</span></div>
+        <p class="lede">Agents and models that run somewhere else reach the same core.</p>
+        <p class="k">ways in</p>
+        <div class="ways">
+          <div class="item"><b>Cortex CLI</b><span>made to be tested on API and cloud models</span></div>
+          <div class="item"><b>Egress proxy</b><span>Claude Code, Codex, Antigravity, unchanged</span></div>
+          <div class="item"><b>MCP server</b><span>any MCP client</span></div>
+        </div>
+        <p class="k">models</p>
+        <div class="item"><b>Hosted APIs</b><span>Meta Model API (Muse Spark 1.3), Baseten (Muse Spark Open)</span></div>
+        <div class="item"><b>Cloud GPUs</b><span>open weights on Modal: Muse Glimmer 30B, Llama 3.3 70B, Llama 4 Maverick</span></div>
+        <p class="k">runs out of</p>
+        <p class="limit">input tokens billed on every turn, and the context ceiling on long tasks</p>
       </div>
     </div>
   </div>
-
-  <p class="note"><b>The core never calls your model.</b> It decides which file text reaches the model's context, so the same reads and fade
-    work for an open model on your own GPU and for a paid API.</p>
-</div></div>
+</div>
 </body>
 </html>

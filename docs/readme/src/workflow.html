@@ -20,7 +20,7 @@
 <body>
 <svg width="1040" height="600" viewBox="0 0 1040 600" role="img" aria-labelledby="workflow-title workflow-desc">
   <title id="workflow-title">One read through CortexNET</title>
-  <desc id="workflow-desc">Whichever way the read arrives (MCP tool, proxied read, Cortex CLI or the Python library), CortexNET returns the
+  <desc id="workflow-desc">Whichever way the read arrives (CortexNET in your own loop locally, or Cortex CLI, the proxy or the MCP server for external sources), CortexNET returns the
     file's outline and the bodies its include model picks. If the agent needs a body it was not shown, it asks for those lines: the range read
     returns them and is logged as a miss that trains the include model for the next read. Otherwise the history is faded once it passes 85% of
     the context, down to 50%, and the next read starts. In Cortex CLI a spiking file manager warms the next files ahead of the read.</desc>
@@ -43,7 +43,7 @@
   <rect x="0.5" y="0.5" width="1039" height="599" rx="16" fill="none" stroke="url(#wf-edge)"/>
 
   <text class="title" x="32" y="48">One read through CortexNET</text>
-  <text class="caption" x="32" y="76">The same loop behind the MCP server, the proxy, Cortex CLI and the Python library, on any model.</text>
+  <text class="caption" x="32" y="76">The same loop locally (CortexNET in your own loop) and for external sources (Cortex CLI, the proxy, the MCP server).</text>
 
   <!-- connectors -->
   <line x1="332" y1="160" x2="332" y2="198" stroke="#a9b39c" stroke-width="1" stroke-dasharray="4,3" marker-end="url(#wf-arrow)"/>
@@ -104,7 +104,7 @@
   <text class="lbl" x="392" y="576">learning loop</text>
   <rect x="520" y="564" width="32" height="16" rx="3" fill="none" stroke="rgba(238,243,228,0.30)" stroke-dasharray="4,3"/>
   <text class="lbl" x="560" y="576">only in Cortex CLI</text>
-  <text class="lbl" x="728" y="576">Fade: Cortex CLI and your own loop.</text>
+  <text class="lbl" x="728" y="576">Fade: local CortexNET, Cortex CLI.</text>
 </svg>
 </body>
 </html>

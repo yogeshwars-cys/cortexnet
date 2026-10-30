@@ -1,9 +1,9 @@
 <!doctype html>
-<!-- README: CortexNET on your own hardware vs on a hosted API. Rendered to docs/readme/deployments.png by render.py (1040 x 624 CSS px at 2x). -->
+<!-- README: CortexNET locally vs external sources (API and cloud models). Rendered to docs/readme/deployments.png by render.py (1040 x 664 CSS px at 2x). -->
 <html lang="en" style="color-scheme: dark">
 <head>
 <meta charset="utf-8">
-<title>Local and hosted</title>
+<title>Local and external</title>
 <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -11,9 +11,9 @@
     --green: #2fae5c; --lime: #a8e22a; --yellow: #eef35a; --rule: rgba(238, 243, 228, 0.12);
   }
   * { box-sizing: border-box; margin: 0; }
-  html, body { width: 1040px; height: 624px; background: transparent; overflow: hidden; }
+  html, body { width: 1040px; height: 664px; background: transparent; overflow: hidden; }
   body { font-family: 'Geist', 'Segoe UI', sans-serif; color: var(--ink); -webkit-font-smoothing: antialiased; }
-  .card { position: relative; width: 1040px; height: 624px; border-radius: 16px; overflow: hidden; padding: 32px; background: var(--paper); }
+  .card { position: relative; width: 1040px; height: 664px; border-radius: 16px; overflow: hidden; padding: 32px; background: var(--paper); }
   .glow { position: absolute; border-radius: 50%; filter: blur(90px); }
   .g1 { left: -160px; top: -200px; width: 600px; height: 420px; background: var(--green); opacity: 0.22; }
   .g2 { right: -160px; top: -200px; width: 560px; height: 400px; background: var(--yellow); opacity: 0.10; }
@@ -36,7 +36,7 @@
   .v { font-size: 13px; line-height: 1.5; color: var(--muted); }
   .v b { color: var(--ink); font-weight: 500; }
 
-  .m { display: grid; grid-template-columns: 112px 1fr; gap: 4px 12px; align-items: baseline; }
+  .m { display: grid; grid-template-columns: 88px 1fr; gap: 4px 12px; align-items: baseline; }
   .n { font: 600 18px 'Geist Mono', Consolas, monospace; letter-spacing: -0.02em; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .local .n { color: var(--lime); }
   .hosted .n { color: var(--yellow); }
@@ -51,29 +51,29 @@
 <div class="card">
   <div class="glow g1"></div><div class="glow g2"></div>
   <div class="content">
-    <h1>Two ways to run it</h1>
-    <p class="caption">The same reads and fade, aimed at whatever runs out first. Every arm keeps the model fixed and changes only the read tool.</p>
+    <h1>Local and external</h1>
+    <p class="caption">The same core, aimed at whatever runs out first. Every comparison keeps the model fixed and changes only the read tool.</p>
 
     <div class="cols">
       <div class="col local">
-        <h2>On your own hardware</h2>
-        <p class="where">llama.cpp, vLLM or transformers; a laptop GPU or rented H100s and H200s</p>
+        <h2>Local: CortexNET</h2>
+        <p class="where">the engine next to llama.cpp on the same machine; tested on a 6 GB laptop GPU</p>
         <div class="row"><p class="k">runs out of</p>
-          <p class="v">the <b>context window</b> (8k on a 6 GB GPU), <b>KV-cache memory</b> and <b>prefill compute</b></p></div>
+          <p class="v">the <b>context window</b>, <b>KV-cache memory</b> and <b>prefill time</b>: 6.14 GB holds 4.4 GB of weights,
+            1.0 GB of KV cache for 8k and 0.4 GB of compute, so the window stays at 8k</p></div>
         <div class="row"><p class="k">cortexnet</p>
-          <p class="v">keeps file text to a third and fades against the window the server reports, so a long session fits; the
-            history stays append-only between fades, so the server's prefix cache keeps working</p></div>
+          <p class="v">puts about a third of the file text in context and fades against the window the server reports; between
+            fades the history is append-only, so the server's prefix cache keeps working</p></div>
         <div class="row"><p class="k">measured</p>
           <div class="m">
-            <p class="n">13/20</p><p class="d"><b>Llama 3.1 8B</b>, 6 GB laptop, one 8k session; whole files: 0/20, overflowed on question 1</p>
-            <p class="n">0.59x</p><p class="d"><b>Muse Glimmer 30B</b>, H100: peak KV cache; 0.42x prefill, same success</p>
-            <p class="n">0.40x</p><p class="d"><b>Llama 4 Maverick</b>, 4x H200: peak context; 0.31x file tokens</p>
+            <p class="n">13/20</p><p class="d"><b>Llama 3.1 8B</b>, 20 questions in one 8k session; whole files: 0/20, overflowed on question 1</p>
+            <p class="n">6,768</p><p class="d"><b>peak context</b> of 8,192 over all 20 questions, with 24 reads faded</p>
           </div></div>
       </div>
 
       <div class="col hosted">
-        <h2>On a hosted API</h2>
-        <p class="where">Meta Model API, Baseten, any OpenAI- or Anthropic-compatible endpoint</p>
+        <h2>External: API and cloud</h2>
+        <p class="where">Cortex CLI, the egress proxy or the MCP server; hosted APIs and open weights on cloud GPUs</p>
         <div class="row"><p class="k">runs out of</p>
           <p class="v"><b>input tokens</b>, billed again on every turn, and the <b>context ceiling</b> on long tasks</p></div>
         <div class="row"><p class="k">cortexnet</p>
@@ -81,9 +81,10 @@
             matching; an optional rule weighs a round trip against tokens re-read from cache</p></div>
         <div class="row"><p class="k">measured</p>
           <div class="m">
-            <p class="n">$0.18</p><p class="d"><b>Muse Spark 1.3</b>, 20-question session, 20/20; whole files: $1.91, 19/20</p>
-            <p class="n">48%</p><p class="d"><b>Muse Spark Open</b>, SWE-bench Lite gold symbol; whole files: 30%, p = 0.02</p>
-            <p class="n">0.61x</p><p class="d"><b>Muse Spark 1.3</b>, SWE-bench Lite cost: $0.132 vs $0.217 per task</p>
+            <p class="n">$0.18</p><p class="d"><b>Muse Spark 1.3</b>, Meta Model API, 20-question session, 20/20; whole files: $1.91, 19/20</p>
+            <p class="n">48%</p><p class="d"><b>Muse Spark Open</b>, Baseten, SWE-bench Lite gold symbol; whole files: 30%, p = 0.02</p>
+            <p class="n">0.59x</p><p class="d"><b>Muse Glimmer 30B</b>, cloud H100: peak KV cache; 0.42x prefill, same success</p>
+            <p class="n">0.40x</p><p class="d"><b>Llama 4 Maverick</b>, 4x cloud H200: peak context; 0.31x file tokens</p>
           </div></div>
       </div>
     </div>

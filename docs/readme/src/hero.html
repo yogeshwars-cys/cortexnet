@@ -47,7 +47,7 @@
   .what { margin-top: 4px; font-size: 13px; line-height: 1.45; color: var(--muted); }
 
   .surfaces { position: absolute; left: 48px; right: 48px; bottom: 28px; display: flex; gap: 8px; align-items: center; font-size: 13px; color: var(--soft); }
-  .chip { font-family: 'Geist Mono', monospace; font-size: 12px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--rule); color: var(--ink); background: rgba(15,19,14,0.6); }
+  .chip { white-space: nowrap; font-family: 'Geist Mono', monospace; font-size: 12px; padding: 4px 8px; border-radius: 4px; border: 1px solid var(--rule); color: var(--ink); background: rgba(15,19,14,0.6); }
   .surfaces .note { margin-left: auto; }
 </style>
 </head>
@@ -56,7 +56,7 @@
   <div class="glow g1"></div><div class="glow g2"></div><div class="glow g3"></div>
   <div class="content">
     <h1>CortexNET gives a coding agent the outline of a file and only the code its next step needs.</h1>
-    <p class="lede">It sits between any coding agent and any model. On your own GPU it keeps a long session inside a small context window; on a hosted API it cuts the tokens you pay for.</p>
+    <p class="lede">Locally, CortexNET keeps a long coding session inside the small context window of a model on your own GPU. With API and cloud models, it cuts the tokens you pay for.</p>
 
     <div class="stats">
       <div class="stat">
@@ -82,8 +82,8 @@
     </div>
   </div>
   <div class="surfaces">
-    <span class="chip">MCP server</span><span class="chip">egress proxy</span><span class="chip">Python library</span><span class="chip">Cortex CLI</span>
-    <span class="note">Same model in both arms, only the read tool changes</span>
+    <span class="chip">CortexNET: local</span><span class="chip">Cortex CLI: API and cloud</span><span class="chip">egress proxy</span><span class="chip">MCP server</span>
+    <span class="note">Only the read tool changes between arms</span>
   </div>
 </div>
 </body>
