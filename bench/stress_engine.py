@@ -9,7 +9,8 @@ server under abuse.
 
 Invariants checked on every read: no exception; the outline's line spans lie inside the file; a range returns exactly
 the lines asked for; a read never returns more than the whole numbered file would (plus a fixed header allowance).
-Temporary files go to $CORTEXNET_TMP (default D:/dev-cache/tmp/cortexnet-stress) and are removed afterwards.
+Temporary files go to $CORTEXNET_TMP (default D:/dev-cache/tmp/cortexnet-stress, else the system temp dir) and are
+removed afterwards. `mcp` exits non-zero if the server loses a call or does not exit cleanly (CI runs it).
 """
 import argparse
 import json
@@ -19,6 +20,7 @@ import random
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tracemalloc
 
@@ -28,7 +30,8 @@ sys.path.insert(0, os.path.dirname(HERE))
 from cortexnet.outline import symbols, tokens  # noqa: E402
 from cortexnet.reader import Reader, numbered  # noqa: E402
 
-TMP = os.environ.get("CORTEXNET_TMP", "D:/dev-cache/tmp/cortexnet-stress")
+TMP = os.environ.get("CORTEXNET_TMP") or os.path.join(
+    "D:/dev-cache/tmp" if os.path.isdir("D:/dev-cache") else tempfile.gettempdir(), "cortexnet-stress")
 RESULTS = os.path.join(HERE, "results")
 EXTS = {".py", ".js", ".ts", ".tsx", ".jsx", ".c", ".h", ".cc", ".cpp", ".hpp", ".cu", ".go", ".rs", ".java", ".kt",
         ".swift", ".rb", ".php", ".cs", ".m", ".mm", ".sh", ".md", ".rst", ".txt", ".json", ".yaml", ".yml", ".toml",
@@ -301,6 +304,8 @@ def main():
         print("\n".join(corpus_summary(rows, errors, wall)))
     if a.what in ("mcp", "all"):
         m = run_mcp()
+        if a.what == "mcp" and (m["lost_burst"] or m["exit"] != 0 or m["unparsable"]):
+            raise SystemExit("MCP server lost calls or did not exit cleanly")   # a failing check for CI
         report += ["## MCP server", "", f"{m['sent']} messages in one pipe (18 malformed or with bad arguments, then a "
                    f"burst of 2000 tool calls): {m['replies']} replies in {m['wall']:.1f} s, {m['lost_burst']} burst "
                    f"calls unanswered, {m['errors']} JSON-RPC errors, {m['tool_errors']} tool errors, "

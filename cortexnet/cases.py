@@ -66,7 +66,7 @@ def build(cases_dir):
         ts = datetime.datetime.fromtimestamp(ev.get("t", 0), datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
         q = "\n".join(x for x in (ev.get("q"), ev.get("intent"), ev.get("query")) if x)
         cases.append(dict(source="sessions", sid="cortex-cli", ts=ts, kind="range", src="disk", path=ev["path"],
-                          text=h, y=y, q=q, h=ev.get("h") or "", prev=[], views_at="range"))
+                          text=h, y=y, spans=spans, q=q, h=ev.get("h") or "", prev=[], views_at="range"))
     stats["labelled"], stats["files"] = len(cases), len({c["text"] for c in cases})
     return cases, texts, stats
 

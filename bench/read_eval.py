@@ -36,6 +36,7 @@ NUM = re.compile(r"^\s*(\d+)\t", re.M)
 
 CONFIGS = {   # name -> Reader kwargs (coproc=True means the loaded head)
     "v1": dict(),
+    "v1 no anchors": dict(anchor=False),
     "v1 + x-ray": dict(xray_top=2),
     "coprocessor": dict(coproc=True),
     "coprocessor + x-ray": dict(coproc=True, xray_top=2),

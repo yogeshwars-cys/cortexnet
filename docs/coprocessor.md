@@ -56,6 +56,36 @@ Gold-line recall per read on the 139 `read_file` calls of the Glimmer 30B SWE-be
 The full system (coprocessor, graph, menu) was the cheapest arm in the laptop session, but on SWE-bench the recall
 gain per read did not turn into more solved tasks.
 
+## Fine-tuning on SWE-bench issues (2026-11-01)
+
+The coprocessor is for requests in plain language, where the anchored reads (which bring the lines a request names)
+have nothing to hold on to; an issue is the clearest case. `bench/subnn_swe.py` turns every SWE-bench instance outside
+SWE-bench Lite into training cases: the issue as the query, each changed Python source file at the base commit, and as
+labels the symbols holding a line the gold patch removes or inserts after (3,203 cases from 1,924 instances, files
+fetched one by one at the base commit). They are training-only; the tests are the two from before, on data the SWE
+cases never touch: the 5-fold session cross-validation (853 read-time cases from the user's own sessions) and the
+139 SWE-bench Lite reads of `read_eval.py`. Same recipe, MiniLM, 64-byte codes, 3-seed ensembles:
+
+| head | session MRR | Lite reads: gold-line recall, top-3 picks (v1 reader: 0.273) |
+|---|---|---|
+| first head (2026-10-27, trained on the outline of that day) | 0.414 on that outline | **0.403** (+0.129 [+0.046, +0.221]) |
+| retrained on the same sessions and git cases (the control) | 0.392 | 0.324 (+0.051 [+0.005, +0.118]) |
+| retrained with the SWE-bench cases added | **0.422** | 0.376 (+0.103 [+0.023, +0.198]) |
+
+- Adding the issues helps on the user's own sessions, a different domain from SWE-bench: +0.030 MRR [+0.010, +0.050]
+  over the control, paired over the same 853 cases (`subnn_swe.md`, `subnn_base_remap.md`).
+- On the Lite reads it beats the control (+0.052 top-3 recall) but not the first head (0.376 vs 0.403); the first head
+  stays the reference, and the SWE-trained head is kept for the next live test.
+- **Two training bugs found on the way, fixed.** (1) Case labels were indices into the file's leaf list; when the
+  Python outline started listing class attributes the indices shifted and pointed at the wrong symbols (the first
+  retraining scored 0.387 on scrambled labels). Labels now carry their line spans and training re-points them at the
+  current outline (`Prep.one`); old cases were carried over by span (1,669 of 1,671). (2) The export fitted its
+  calibration on a 15% validation window of 64-115 cases and came out reversed in some draws (w_rel -0.70); it now
+  fits on the cross-validation's out-of-fold scores (853 cases, w_rel +2.97).
+- Read time without a model: on these issue-text reads the anchored lines leave gold-line recall within noise (0.273
+  with anchors, 0.312 without, [-0.055, +0.143]) and show a needed symbol more often (45% vs 40%;
+  `read_eval_anchors.md`); long issues name many identifiers, so the anchors spread the budget thin.
+
 ## What did not help
 
 - **Two bugs, fixed.** The first exported head had an inverted calibration (slope -0.71, fit on raw scores pooled
@@ -94,6 +124,6 @@ set, which needs a few hundred cases before a retrained head means anything.
 | `cortexnet/coproc.py`, `cortexnet/codec.py` | coprocessor runtime and calibration, 64-byte bit-plane symbol codes |
 | `cortexnet/graph.py` | co-need graph over the coprocessor's symbol cells |
 | `cortexnet/cases.py` | `cortex learn`: session reads to training cases |
-| `bench/subnn_data.py`, `bench/subnn_train.py`, `bench/subnn_attn.py` | cases, training and cross-validation, attention-label study |
+| `bench/subnn_data.py`, `bench/subnn_swe.py`, `bench/subnn_train.py`, `bench/subnn_attn.py` | cases (sessions, git, SWE-bench issues), training and cross-validation, attention-label study |
 | `bench/read_eval.py` | offline read evaluation on SWE-bench Lite read cases |
 | `bench/subnn_hedge.py`, `bench/subnn_fuse.py`, `bench/*_signal.py`, `bench/*_snapshot.py`, `bench/commit_symbols.py` | encoder, feature and label studies |
