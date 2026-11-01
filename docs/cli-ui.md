@@ -175,6 +175,23 @@ Built, with tests in `tests/test_cli_commands.py` (12) and `tests/test_workflow.
 - Fixed on the way: `edit_file` turned CRLF files into LF; it now keeps the file's line ending.
 - Not done: `/full` (bypass the outlining of long `run` output).
 
+## 5. What the leading terminal agents share (added 2026-11-02)
+
+Claude Code, Codex CLI, Gemini CLI and OpenCode all load a project memory file, take `@file` and `!command` at the
+prompt, and have a headless mode with JSON output. Cortex CLI now does too, shaped for a small context window:
+
+- [x] 5.1 Project notes: `AGENTS.md`, else `CORTEX.md`, else `CLAUDE.md` at the repository root joins the system
+  prompt, cut to a tenth of `--ctx` (at least 300 tokens) with a note saying so; `/memory` shows it, `--no-memory`
+  skips it, the header names the file. (`project_memory`, `MEMORY_HEAD`)
+- [x] 5.2 `@path`: every named file that exists (at most 3) is read through CortexNET before the model's turn, with the
+  message as the query, as an injected `read_file` (the held-out runs: pre-reading took Llama 3.2 1B from 6% to 23%).
+  Tab completes repository paths after an `@`, by any part of the path. E-mail addresses and missing files are left
+  alone. (`mention_reads`, `slash_completer`)
+- [x] 5.3 `!command`: runs at once (typing it is the confirmation) and the output joins the conversation like `/test`.
+- [x] 5.4 `--json` with a task: one JSON object on stdout (`ok`, `answer`, `seconds`, the session's numbers, the notes
+  file); progress goes to stderr, and edits and commands are declined unless `--yes`, so it is safe in a script.
+- [x] 5.5 esc enter and ctrl-j insert a new line (enter sends); the toolbar lists `/ commands`, `@ files`, `! shell`.
+
 ## Build order (suggested PRs)
 
 1. PR1: §0 plumbing + `/reads` + `/context` (read-only, no state changes).
