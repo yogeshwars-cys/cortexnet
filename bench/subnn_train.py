@@ -122,7 +122,12 @@ class Prep:
         query = q + "\n" + h
         phi, _ = featurize(f["syms"], f["lines"], query, changed=(), asked=(), trail=trail)
         y = np.zeros(len(f["syms"]), bool)
-        y[c["y"]] = True
+        if c.get("spans"):
+            # labels as line spans, re-pointed at the current outline's leaves: indices shift whenever the outline
+            # changes (class attributes joined it on 2026-11-01)
+            y[[j for j, s in enumerate(f["syms"]) if any(s.start <= b and s.end >= a for a, b in c["spans"])]] = True
+        else:
+            y[c["y"]] = True
         hid = idents(h)
         H = np.array([math.log1p(tokens(h)) / 8 if h else 0.0, len(hid) / max(1, len(h.split())) if h else 0.0],
                      np.float32)
@@ -859,19 +864,24 @@ def main():
     write_report(pooled, per_fold, per_seed, cost, np.concatenate(gate_pi), np.array(gate_h), test_all, late_all,
                  time_rows, len(te), K, t0, enc_name, emb.shape[1], (len(known), h_med, np.median(test_h)), a.out)
     if a.export:
-        export_head(pack, C, dict(base), a.export, enc_name, codec)
+        full_oof = pooled["full Cortex-SubNN"]
+        export_head(pack, C, dict(base), a.export, enc_name, codec,
+                    oof=(lambda c: full_oof[id(c)], [c for c in test_all if id(c) in full_oof]))
 
 
-def export_head(pack, C, cfg, path, enc_name, codec):
+def export_head(pack, C, cfg, path, enc_name, codec, oof=None):
     """One model on every case (15% of the sessions held out for early stopping and Platt), saved as numpy arrays
-    for cortexnet/coproc.py, together with the codec when symbols were coded."""
+    for cortexnet/coproc.py, together with the codec when symbols were coded.
+    oof: (score, cases) from the cross-validation, every case scored by a model that never saw its session. When given,
+    Platt is fitted on those (854 cases) instead of the small validation window, which fits a reversed weight in some
+    draws."""
     real = [c for c in C if c["c"]["source"] == "sessions" and c["c"].get("views_at") != "edit"]
     sids = sorted({c["c"]["sid"] for c in real})
     val_sids = set(np.random.default_rng(7).choice(sids, max(1, int(0.15 * len(sids))), replace=False))
     va = [c for c in real if c["c"]["sid"] in val_sids]
     tr = [c for c in C if c["c"]["sid"] not in val_sids]
     m, vb = train(pack, tr, va, cfg, 0)
-    cal = platt(scorer(m, pack, va, cfg), va).ab              # (w_rel, w_max, w_logn, b)
+    cal = (platt(*oof) if oof else platt(scorer(m, pack, va, cfg), va)).ab   # (w_rel, w_max, w_logn, b)
     if cal[0] <= 0:
         raise SystemExit(f"not exporting: calibration weight on s - max s is {cal[0]:.3f} <= 0")
     t = lambda x: x.detach().float().cpu().numpy()  # noqa: E731

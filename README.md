@@ -5,6 +5,11 @@
 
 # CortexNET
 
+[![tests](https://github.com/yogeshwars-cys/cortexnet/actions/workflows/tests.yml/badge.svg)](https://github.com/yogeshwars-cys/cortexnet/actions/workflows/tests.yml)
+![python](https://img.shields.io/badge/python-3.10%20%7C%203.13-3776ab)
+[![license](https://img.shields.io/badge/license-PolyForm%20Noncommercial-2fae5c)](LICENSE.md)
+[![results](https://img.shields.io/badge/results-every%20run%20indexed-a8e22a)](bench/results/README.md)
+
 <p align="center">
   <img src="docs/readme/hero.png" width="900"
        alt="CortexNET gives a coding agent the outline of a file and only the code its next step needs. Locally, CortexNET keeps a long coding session inside the small context window of a model on your own GPU; with API and cloud models it cuts the tokens you pay for. Results: Muse Spark 1.3, $0.18 vs $1.91 for a 20-question session at 20/20 correct (whole-file reads 19/20); Muse Spark Open, 48% vs 30% gold symbol on SWE-bench Lite (7 won, 0 lost, p = 0.02); Llama 3.1 8B, 13/20 vs 0/20 in one 8k session on a 6 GB laptop GPU; Muse Glimmer 30B, 0.42x prefill tokens on SWE-bench Lite with the same task success. CortexNET runs locally; Cortex CLI, the egress proxy and the MCP server serve API and cloud models.">
@@ -86,12 +91,13 @@ otherwise overflows the context or costs ten times more.
 | Muse Spark Open (`meta-models/muse-spark-open-1026`) | Baseten | session A/B, SWE-bench Lite (`bench/swe_api.py --baseten`) |
 | Muse Glimmer 30B (open weights) | our own H100s on Modal (`bench/modal_glimmer.py`) | SWE-bench Lite agent A/B, read-time probes |
 | Llama 3.3 70B, Llama 4 Maverick | vLLM on Modal H200s (`bench/modal_vllm.py`) | SWE-bench Lite |
-| Llama 3.1 8B Instruct | llama.cpp on a 6 GB laptop GPU | session A/B at 8k context |
+| Llama 3.1 8B Instruct | llama.cpp on a 6 GB laptop GPU; llama.cpp on Modal L40S (`bench/modal_llamacpp.py`) | session A/B at 8k context; held-out sessions at 8k-32k on unseen repositories |
+| Llama 3.2 3B and 1B Instruct | llama.cpp on Modal L4 / L40S (`bench/modal_llamacpp.py`) | small-model sessions of up to 60 questions (`bench/heldout.py --set v3`) |
 
 **What was built during the hackathon: all of it.** Every file in this repository was written in the building period
 (27 Oct to 4 Nov 2026); the first commit is dated 27 Oct and `git log` shows each step since. Used, not written here:
 numpy, Rich and prompt_toolkit (CLI), llama.cpp and vLLM (serving), MiniLM (an optional coprocessor encoder) and the
-public SWE-bench Lite tasks.
+public SWE-bench and SWE-bench Lite tasks.
 
 ## Results
 
@@ -293,7 +299,9 @@ Measured, see `bench/results/` and the log of every run:
 
 - **A learned body picker** (the Cortex-SubNN coprocessor, with a symbol graph and a connected-symbol menu on top)
   raised per-read recall offline (+0.185 gold-line recall) but solved no more tasks than plain CortexNET reads in any
-  live run. It is off by default; design, measurements and studies are in `docs/coprocessor.md`.
+  live run. It is off by default; design, measurements and studies are in `docs/coprocessor.md`. Retrained with
+  3,203 SWE-bench issues (outside Lite) as extra cases, it ranks the user's own sessions better (+0.030 MRR [+0.010,
+  +0.050]) but does not beat the first head on SWE-bench Lite reads.
 - Neural-dynamics options (`bench/results/replay_sessions.md`, 67 sessions; laptop session above), all off by default:
   a homeostatic include threshold changes nothing (the include model's probabilities rarely sit near the threshold);
   refractory bodies change nothing on replay (re-reads there mostly follow edits, so the body changed) and stay within
