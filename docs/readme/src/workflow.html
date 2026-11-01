@@ -21,7 +21,7 @@
 <svg width="1040" height="600" viewBox="0 0 1040 600" role="img" aria-labelledby="workflow-title workflow-desc">
   <title id="workflow-title">One read through CortexNET</title>
   <desc id="workflow-desc">Whichever way the read arrives (CortexNET in your own loop locally, or Cortex CLI, the proxy or the MCP server for external sources), CortexNET returns the
-    file's outline and the bodies its include model picks. If the agent needs a body it was not shown, it asks for those lines: the range read
+    file's outline, the lines the request names and the bodies its include model picks. If the agent needs a body it was not shown, it asks for those lines: the range read
     returns them and is logged as a miss that trains the include model for the next read. Otherwise the history is faded once it passes 85% of
     the context, down to 50%, and the next read starts. In Cortex CLI a spiking file manager warms the next files ahead of the read.</desc>
   <defs>
@@ -73,8 +73,9 @@
 
   <rect x="240" y="200" width="184" height="64" rx="6" fill="#121612"/>
   <rect x="240" y="200" width="184" height="64" rx="6" fill="rgba(168,226,42,0.10)" stroke="url(#wf-focal)" stroke-width="1.6"/>
-  <text class="name" x="332" y="228">Outline-first read</text>
-  <text class="sub" x="332" y="248">outline + picked bodies</text>
+  <text class="name" x="332" y="224">Outline-first read</text>
+  <text class="sub" x="332" y="242">outline + named lines</text>
+  <text class="sub" x="332" y="257">+ picked bodies</text>
 
   <rect x="456" y="200" width="120" height="64" rx="6" fill="#182018" stroke="rgba(238,243,228,0.55)"/>
   <text class="name" x="516" y="228">Agent works</text>
