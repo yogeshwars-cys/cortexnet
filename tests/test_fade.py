@@ -52,6 +52,35 @@ class TestFade(unittest.TestCase):
         self.assertTrue(tools[0].startswith(MARK + "a.py; superseded"))
         self.assertTrue(all(t.endswith("x") for t in tools[1:]))
 
+    def test_paging_through_one_file_squeezes_older_pages_but_never_the_newest(self):
+        msgs = history(["big.py"])                              # one read_file, then three read_lines of the same file
+        for i in range(3):
+            msgs.append({"role": "assistant", "content": "", "tool_calls": [{"id": f"r{i}", "type": "function",
+                         "function": {"name": "read_lines", "arguments": json.dumps({"path": "big.py"})}}]})
+            msgs.append({"role": "tool", "tool_call_id": f"r{i}", "name": "read_lines", "content": "y" * 1000})
+        n = watermark_fade(msgs, 1000, 1000, lambda p: "outline " + p, keep=4, keep_frac=1.0)
+        tools = [m["content"] for m in msgs if m["role"] == "tool"]
+        self.assertEqual(n, 3)                # every read is of a recent file: only the squeeze, down to the low mark
+        self.assertTrue(tools[0].startswith(MARK + "big.py; its outline") and tools[2].startswith(MARK + "big.py"))
+        self.assertTrue(tools[3] == "y" * 1000)                 # the newest result stays
+        # below the high mark after the usual passes: no squeeze, recent reads stay
+        msgs = history(["a.py", "b.py", "c.py"])
+        self.assertEqual(watermark_fade(msgs, 900, 1000, lambda p: "outline " + p, keep=1, low=0.7), 1)
+        self.assertTrue([m["content"] for m in msgs if m["role"] == "tool"][2].startswith("c.py:"))
+
+    def test_turns_drop_the_oldest_exchanges_when_results_cannot_shrink_enough(self):
+        msgs = [{"role": "system", "content": "s"}]
+        for i in range(6):                                       # six answered questions, no tool results to fade
+            msgs += [{"role": "user", "content": f"q{i} " + "w" * 400}, {"role": "assistant", "content": "a" * 400}]
+        before = len(msgs)
+        self.assertEqual(watermark_fade(msgs, 1300, 1000, lambda p: "o"), 0)       # off by default: nothing to do
+        n = watermark_fade(msgs, 1300, 1000, lambda p: "o", turns=True)
+        self.assertGreater(n, 0)
+        self.assertEqual(msgs[0]["content"], "s")                                  # the system message stays
+        self.assertTrue(msgs[-2]["content"].startswith("q5"))                      # the latest exchange stays
+        self.assertEqual(len(msgs), before - n)
+        self.assertTrue(msgs[1]["content"].startswith("q4") or msgs[1]["content"].startswith("q3"))
+
     def test_older_copies_of_a_recent_file_are_still_superseded(self):
         msgs = history(["a.py", "a.py", "b.py", "a.py"])        # a.py is recent, its first two copies are not needed
         n = watermark_fade(msgs, 950, 1000, lambda p: "outline " + p, low=0.3, keep=2, keep_frac=1.0)
@@ -68,7 +97,9 @@ class TestFade(unittest.TestCase):
         self.assertEqual(n, 2)
         self.assertTrue(tools[0].startswith(MARK) and tools[1].startswith(MARK) and tools[2].startswith("c.py:"))
         msgs = history(["a.py"])                                  # the newest result is kept even above the cap
-        self.assertEqual(watermark_fade(msgs, 900, 100, lambda p: "o", keep=4, keep_frac=0.01), 0)
+        self.assertEqual(watermark_fade(msgs, 900, 1000, lambda p: "o", keep=4, keep_frac=0.01), 0)
+        # ... unless it cannot fit at all: then it goes too, or every later request of the session would overflow
+        self.assertEqual(watermark_fade(msgs, 900, 100, lambda p: "o", keep=4, keep_frac=0.01), 1)
 
     def test_without_a_short_outline_a_stale_read_becomes_a_pointer(self):
         msgs = history(["a.py", "b.py", "c.py"])

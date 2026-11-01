@@ -20,6 +20,7 @@ Paid backends stop before a call would push total spend past --budget. Spend is 
 fixture (this repo's package and Python standard library files), because hosted APIs may keep what they are sent.
 """
 import argparse
+import http.client
 import json
 import os
 import re
@@ -135,12 +136,16 @@ def tool_specs(arm):
               {"pattern": s, "path": {"type": "string", "description": "file or directory, relative"}}, ["pattern"])
     if base_arm(arm) == "baseline":
         return [fn("read_file", "Return the whole file with line numbers.", {"path": s}, ["path"]), grep]
+    lines = fn("read_lines", "Return lines start..end of a file with line numbers.",
+               {"path": s, "start": {"type": "integer"}, "end": {"type": "integer"}}, ["path", "start", "end"])
+    if base_arm(arm) == "paged":
+        return [fn("read_file", "Read a file. Small files come back whole with line numbers; longer files come back "
+                   "as their first page of lines. Use read_lines to see any other lines.", {"path": s}, ["path"]),
+                lines, grep]
     # same tool name as the baseline, so the A/B measures what the tool returns, not how it is named
     return [fn("read_file", "Read a file. Small files come back whole with line numbers; large files come back as an "
                "outline (each function/class with its line range) plus the parts most likely relevant to `query`. "
-               "Use read_lines to see any other lines.", {"path": s, "query": s}, ["path"]),
-            fn("read_lines", "Return lines start..end of a file with line numbers.",
-               {"path": s, "start": {"type": "integer"}, "end": {"type": "integer"}}, ["path", "start", "end"]), grep] \
+               "Use read_lines to see any other lines.", {"path": s, "query": s}, ["path"]), lines, grep] \
         + ([fn("cortex_approve", "Pull the bodies of connected symbols offered in a [connected] menu, by id "
                "(e.g. [\"#3\"]).", {"ids": {"type": "array", "items": s}}, ["ids"])]
            if (ARMS[base_arm(arm)] or {}).get("menu") else [])
@@ -151,7 +156,14 @@ def tool_specs(arm):
 # cortex_approve tool), on top of outline-first reads, sub-block splits and the trail.
 # Any arm + "+fade" (e.g. cortex+fade) also fades stale reads to outlines in one batch near the context limit.
 # "fulldyn" adds the refractory bodies and the charge-ordered fade (cortexnet/reader.py, fade.py).
-ARMS = {"baseline": None, "cortex": {}, "coproc": dict(coproc=True), "coproc_ab": dict(coproc=True, policy="rule_ab"),
+# "paged" = the usual agent file tool, no CortexNET: the first PAGE lines (like SWE-agent's window or a truncated
+# Read), then line ranges. "cortexna" = cortex without the anchored lines (anchors() in cortexnet/reader.py);
+# "cortexf" = cortex with focus (anchored lines first, for small models).
+PAGE = 200
+READ_MAX = None     # tokens one read may return, for the cortex and paged arms alike (bench/heldout.py: ctx / 4)
+ARMS = {"baseline": None, "paged": None, "cortex": {}, "cortexna": dict(anchor=False), "cortexf": dict(focus=True),
+        "coproc": dict(coproc=True),
+        "coproc_ab": dict(coproc=True, policy="rule_ab"),
         "full": dict(coproc=True, menu=True, graph=True),
         "fulldyn": dict(coproc=True, menu=True, graph=True, refractory=True, fade_order="charge"),
         "coprocdyn": dict(coproc=True, refractory=True, fade_order="charge")}
@@ -179,7 +191,7 @@ class Tools:
         if kw.pop("graph", False):
             from cortexnet.graph import CoNeedGraph
             kw["graph"] = CoNeedGraph()
-        self.reader = None if cfg is None else Reader(state, split_tokens=600, **kw)
+        self.reader = None if cfg is None else Reader(state, split_tokens=600, max_tokens=READ_MAX, **kw)
 
     def outline(self, path):
         """The file's outline (what a faded read leaves behind), or None if the path does not resolve."""
@@ -220,6 +232,22 @@ class Tools:
             if name == "read_file" and self.reader:
                 return self.reader.read(self._p(a["path"]), (self.task + "\n" + (a.get("query") or "")).strip(),
                                         snapshot=snapshot)
+            if name in ("read_file", "read_lines") and base_arm(self.arm) == "paged":
+                with open(self._p(a["path"]), encoding="utf8", errors="replace") as fh:
+                    lines = fh.read().split("\n")
+                if name == "read_lines":
+                    s, e = max(1, int(a["start"])), min(len(lines), int(a["end"]))
+                    return numbered(lines, s, e) if s <= e else f"empty range: file has {len(lines)} lines"
+                page = PAGE
+                if READ_MAX:                       # the same per-read token cap as the cortex arms, in whole lines
+                    used, page = 0, 0
+                    while page < len(lines) and used + tokens(f"{page + 1:6d}\t{lines[page]}\n") <= READ_MAX:
+                        used += tokens(f"{page + 1:6d}\t{lines[page]}\n")
+                        page += 1
+                    page = max(page, 1)
+                if len(lines) <= page:
+                    return numbered(lines, 1, len(lines))
+                return numbered(lines, 1, page) + f"\n[lines 1-{page} of {len(lines)}; use read_lines for the rest]"
             if name == "read_file":
                 with open(self._p(a["path"]), encoding="utf8", errors="replace") as fh:
                     lines = fh.read().split("\n")
@@ -332,7 +360,8 @@ def post(url, body, key=None, tries=4, timeout=600):
             unparsed = e.code == 500 and "expected" in msg and "format" in msg
             if e.code not in (429, 500, 502, 503, 504) or unparsed or i == tries - 1:
                 raise RuntimeError(f"HTTP {e.code}: {msg}") from None
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, TimeoutError, http.client.HTTPException, ConnectionError):
+            # a dropped connection (e.g. a busy endpoint closing a queued request) is retried like a timeout
             if i == tries - 1:
                 raise
         time.sleep(2 ** i * 5)
@@ -341,14 +370,23 @@ def post(url, body, key=None, tries=4, timeout=600):
 class OpenAIBackend:
     """Chat completions. Messages are kept in the standard shape: tool_calls with ids and JSON-string arguments."""
 
-    def __init__(self, base, model="local", key=None):
-        self.base, self.name, self.key = base.rstrip("/"), model, key
-        self.last = {}
+    def __init__(self, base, model="local", key=None, repair=False):
+        """repair: when llama-server cannot parse a tool call the model started (HTTP 500 "...expected ... format"),
+        ask once more with tool_choice "required", whose grammar only admits valid calls. Off by default, so the
+        earlier runs stay reproducible; bench/heldout.py turns it on for every arm alike."""
+        self.base, self.name, self.key, self.repair = base.rstrip("/"), model, key, repair
+        self.last, self.repairs = {}, 0
 
     def chat(self, messages, tools):
         msgs = [{k: v for k, v in m.items() if not k.startswith("_")} for m in messages]
-        r = post(self.base + "/chat/completions",
-                 {"model": self.name, "messages": msgs, "tools": tools, "temperature": 0}, self.key)
+        body = {"model": self.name, "messages": msgs, "tools": tools, "temperature": 0}
+        try:
+            r = post(self.base + "/chat/completions", body, self.key)
+        except RuntimeError as e:
+            if not (self.repair and "HTTP 500" in str(e) and "expected" in str(e) and "format" in str(e)):
+                raise
+            self.repairs += 1
+            r = post(self.base + "/chat/completions", dict(body, tool_choice="required"), self.key)
         msg = r["choices"][0]["message"]
         calls = []
         for c in msg.get("tool_calls") or []:
@@ -452,11 +490,16 @@ def msg_tokens(msgs):
 
 
 def run_task(backend, root, arm, q, state, max_calls=8, trace=None, count_errors=False, hint=False, coproc=None,
-             session=None, fade=None):
+             session=None, fade=None, preread=False, recover=False):
     """One question through the tool loop. With count_errors, a server error (e.g. the context overflowed) ends the
     task as a failure of this arm, recorded in st["error"], instead of raising.
     session: a dict kept across questions (one conversation per arm: its messages and tools); None = fresh per task.
-    fade: dict(limit, mark, keep) for "+fade" arms; the token estimate is scaled by the server's own prompt counts."""
+    fade: dict(limit, mark, keep) for "+fade" arms; the token estimate is scaled by the server's own prompt counts.
+    preread: before the model's first turn, read_file each workspace file the question names (at most 2) through the
+    arm's own tool and put the call and its result in the history, as if the model had asked (a small model may never
+    call a tool itself).
+    recover: when the server rejects a request as too long, take its prompt count as the new tokens-per-estimate
+    ratio; without it the fade's estimate stays low after an overflow and every later request fails too."""
     specs = tool_specs(arm)
     files = sorted(os.path.relpath(os.path.join(dp, f), root).replace("\\", "/") for dp, _, fs in os.walk(root)
                    for f in fs if f.endswith(".py") and ".state" not in dp)
@@ -471,7 +514,15 @@ def run_task(backend, root, arm, q, state, max_calls=8, trace=None, count_errors
     msgs.append({"role": "user", "content": q})
     st = dict(input_tokens=0, cached_tokens=0, output_tokens=0, reasoning_tokens=0, usd=0.0, tool_tokens=0, calls=0,
               answer="", prefill_tokens=0, prefill_ms=0.0, gen_ms=0.0, peak_context=0, seconds=0.0, error="",
-              fades=0, context_end=0)
+              fades=0, context_end=0, prereads=0)
+    for j, f in enumerate([f for f in files if f in q][:2] if preread else []):
+        cid, args = f"pre_{len(msgs)}_{j}", {"path": f}
+        msgs.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": cid, "type": "function", "function": {"name": "read_file", "arguments": json.dumps(args)}}]})
+        out = tools.call("read_file", args)
+        msgs.append({"role": "tool", "tool_call_id": cid, "name": "read_file", "content": out})
+        st["prereads"] += 1
+        st["tool_tokens"] += tokens(out)
     t0 = time.time()
     for turn in range(max_calls + 1):
         if fade:
@@ -479,7 +530,7 @@ def run_task(backend, root, arm, q, state, max_calls=8, trace=None, count_errors
             st["fades"] += watermark_fade(msgs, sess["ratio"] * msg_tokens(msgs), fade["limit"], tools.outline,
                                           mark=fade["mark"], low=fade["low"], keep=fade["keep"],
                                           keep_frac=fade["keep_frac"], scale=sess["ratio"], order=tools.fade_order,
-                                          on_fade=forget)
+                                          on_fade=forget, turns=fade.get("turns", False))
         sent = msg_tokens(msgs)
         try:
             content, calls, n_in = backend.chat(msgs, specs)
@@ -487,6 +538,9 @@ def run_task(backend, root, arm, q, state, max_calls=8, trace=None, count_errors
             if not count_errors or re.match(r"HTTP 40[13]\b", str(e)):   # auth problems abort the run
                 raise
             st["error"] = f"{str(e)[:240]} (rejected request ~{int(sess['ratio'] * sent):,} tokens)"
+            m = re.search(r'"n_prompt_tokens":\s*(\d+)', str(e))
+            if recover and m:          # the server counted the rejected prompt: learn the ratio from it, so the next
+                sess["ratio"] = int(m.group(1)) / max(sent, 1)      # fade sees the real size and the session recovers
             break
         if n_in:
             sess["ratio"] = n_in / max(sent, 1)       # server tokens per estimated token (tokenizer + template)

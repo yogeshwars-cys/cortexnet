@@ -35,6 +35,7 @@ Neural-dynamics options (all off by default; bench/replay_sessions.py measures e
            scores) and only those above `menu_floor` are offered, up to menu_size, so a flat field offers nothing.
   learn_rule   "nlms": the include model's per-feature normalised steps (cortexnet/learn.py).
 """
+import bisect
 import difflib
 import json
 import os
@@ -44,12 +45,129 @@ import time
 import numpy as np
 
 from .learn import FEATURES, IncludeModel, featurize, idents
-from .outline import outline, skeleton, symbols, tokens
+from .outline import OUTLINE_MAX, outline, skeleton, symbols, tokens
 from .policy import H_REM_PRIOR, effective_turn, rule_ab
 
 DECAY = 0.7
 SRC_EXT = {".py", ".js", ".jsx", ".ts", ".tsx", ".mjs", ".go", ".rs", ".c", ".cc", ".cpp", ".h", ".hpp", ".java",
            ".kt", ".dart", ".swift", ".cs", ".rb", ".php", ".lua", ".md", ".html", ".css", ".vue", ".svelte"}
+
+
+QUOTED = re.compile(r'"([^"\n]{3,})"|`([^`\n]{2,})`|\'([^\'\n]{3,})\'')
+
+
+def anchors(lines, syms, query, max_hits=6):
+    """Lines holding the request's literal anchors, best first: quoted text (an error message, a string value)
+    matched by its first 24 characters, then `code` names at their definition or assignment (inside the named class
+    when a dotted name gives one). A small model asked about one line of a big file rarely asks for a range when the
+    outline does not show it, so these lines go up front."""
+    hits, names = [], []
+    for m in QUOTED.finditer(query or ""):
+        t = next(g for g in m.groups() if g).strip()
+        if " " in t or len(t) > 24 or not re.fullmatch(r"[\w.]+", t):
+            frag = t[:24]
+            hits += [i for i, l in enumerate(lines, 1) if frag in l][:2]
+        else:
+            names.append(t.split("."))
+    bare = QUOTED.sub(" ", query or "")
+    for t in re.findall(r"\b[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\b|\b\w*_\w+\b|\b[A-Z][a-z0-9]+[A-Z]\w*\b", bare):
+        names.append(t.split("."))          # code-like words without quotes: Index.suffix, compute_hash, QuerySet
+    for parts in list(dict.fromkeys(map(tuple, names))):
+        name, owner = parts[-1], parts[-2] if len(parts) > 1 else None
+        rx = re.compile(rf"^\s*(?:(?:async\s+)?def|class)\s+{re.escape(name)}\b|^\s*{re.escape(name)}\s*(?::[^=]*)?=(?!=)")
+        found = [i for i, l in enumerate(lines, 1) if rx.match(l)]
+        if owner:
+            spans = [(s.start, s.end) for s in syms if s.name == owner and s.kind == "class"]
+            inside = [i for i in found if any(a <= i <= b for a, b in spans)]
+            found = inside or found
+        hits += found[:2]
+    return list(dict.fromkeys(hits))[:max_hits]
+
+
+class Where:
+    """The def or class a line sits in, for every span of one read: parent links between the defs and classes,
+    built once, instead of a scan of every symbol per span (a read can show thousands of small bodies)."""
+
+    def __init__(self, syms):
+        self.defs = sorted((s for s in syms if s.kind in ("def", "class")), key=lambda s: (s.start, s.depth))
+        self.starts = [s.start for s in self.defs]
+        self.heads = set(self.starts)
+        self.parent, stack = [], []
+        for i, s in enumerate(self.defs):
+            while stack and self.defs[stack[-1]].end < s.start:
+                stack.pop()
+            self.parent.append(stack[-1] if stack else None)
+            stack.append(i)
+
+    def _inner(self, a):
+        i = bisect.bisect_left(self.starts, a) - 1
+        while i is not None and i >= 0:
+            if self.defs[i].end >= a:
+                return i
+            i = self.parent[i]
+        return None
+
+    def inner(self, a):
+        """The innermost def or class that starts before line a and still holds it, or None."""
+        i = self._inner(a)
+        return None if i is None else self.defs[i]
+
+    def __call__(self, a, b):
+        """' (in Class.method, L60-120)' for a span that starts inside a def or class rather than at its first line,
+        so a window around an anchor names the function it belongs to; '' otherwise."""
+        if a in self.heads:
+            return ""
+        i = self._inner(a)
+        if i is None:
+            return ""
+        s = self.defs[i]
+        owner = self.parent[i]
+        while owner is not None and not (self.defs[owner].kind == "class" and self.defs[owner].depth < s.depth):
+            owner = self.parent[owner]
+        name = f"{self.defs[owner].name}.{s.name}" if owner is not None else s.name
+        return f" (in {name}, L{s.start}-{s.end})"
+
+
+def where(syms, a, b):
+    return Where(syms)(a, b)
+
+
+class Spans:
+    """Disjoint line spans kept sorted: an O(log n) overlap test. Spans are added only after that test, so they stay
+    disjoint, and among the spans starting at or before b the last one reaches furthest."""
+
+    def __init__(self):
+        self.starts, self.ends = [], []
+
+    def overlaps(self, a, b):
+        i = bisect.bisect_right(self.starts, b) - 1
+        return i >= 0 and self.ends[i] >= a
+
+    def add(self, a, b):
+        i = bisect.bisect_left(self.starts, a)
+        self.starts.insert(i, a)
+        self.ends.insert(i, b)
+
+
+def changed_lines(old, new, max_cells=4_000_000):
+    """1-based lines of `new` that an edit touched. The common prefix and suffix are skipped first (edits are local),
+    then only the middle is diffed; a middle too big to diff (difflib is quadratic on repetitive lines) counts as
+    changed as a whole."""
+    n = min(len(old), len(new))
+    lo = 0
+    while lo < n and old[lo] == new[lo]:
+        lo += 1
+    hi = 0
+    while hi < n - lo and old[-1 - hi] == new[-1 - hi]:
+        hi += 1
+    a, b = old[lo:len(old) - hi], new[lo:len(new) - hi]
+    if len(a) * len(b) > max_cells:
+        return set(range(lo + 1, lo + max(len(b), 1) + 1))
+    out = set()
+    for op, _, _, j1, j2 in difflib.SequenceMatcher(a=a, b=b, autojunk=False).get_opcodes():
+        if op != "equal":
+            out.update(range(lo + j1 + 1, lo + max(j2, j1 + 1) + 1))
+    return out
 
 
 def numbered(lines, a, b):
@@ -62,7 +180,14 @@ class Reader:
                  coproc=None, policy="budget", ctx_base=20000, h_rem=H_REM_PRIOR, graph=None, coproc_top=1,
                  coproc_max=400, xray_top=0, xray_lines=12, xray_budget=400, mmr_beta=0.0, homeostasis=0.0,
                  miss_target=0.3, homeo_rate=0.1, refractory=False, menu_rule="topk", menu_floor=0.25,
-                 learn_rule="logistic"):
+                 learn_rule="logistic", max_tokens=None, anchor=True, anchor_max=400, focus=False):
+        """max_tokens: a cap on one read's output (outline at most half of it, bodies the rest); set it from the
+        context window (e.g. a quarter of it) so one read of a big file cannot fill a small context. None = no cap."""
+        self.max_tokens = max_tokens
+        self.anchor, self.anchor_max = anchor, anchor_max      # anchors(): the request's literal lines go up front
+        # focus: anchored lines are shown first, before the outline, labelled as matching the request, and a window
+        # on a def/class line starts at that line (small models read the top of a tool result)
+        self.focus = focus
         self.coproc, self.policy, self.ctx_base, self.h_rem, self.graph = coproc, policy, ctx_base, h_rem, graph
         self.homeostasis, self.miss_target, self.homeo_rate = homeostasis, miss_target, homeo_rate
         self.h_miss = miss_target              # the thermostat starts at its set point
@@ -114,6 +239,21 @@ class Reader:
                 self.active.append([weight, (p, s.start, s.end), s.name.lower(), idents(text)])
                 self.text_of[(p, s.start, s.end)] = s.name + "\n" + text[:800]
         self.active = self.active[-30:]
+
+    def _touch_many(self, p, spans, weight=1.0):
+        """_touch for each span in order. Only the newest 30 entries of self.active survive a touch, so only the last
+        spans that fill them are scanned (one read can take thousands of tiny bodies, each scan is over every symbol)."""
+        st = self.files.get(p)
+        if not st:
+            return
+        keep, n = [], 0
+        for a, b in reversed(spans):
+            keep.append((a, b))
+            n += sum(1 for s in st["syms"] if s.start <= b and s.end >= a and not s.children)
+            if n >= 30:
+                break
+        for a, b in reversed(keep):
+            self._touch(p, a, b, weight)
 
     def _cells(self, p, a, b):
         st = self.files.get(p) or {}
@@ -214,10 +354,7 @@ class Reader:
         old = self.files.get(p)
         changed = set()
         if old is not None and old["lines"] != lines:
-            sm = difflib.SequenceMatcher(a=old["lines"], b=lines, autojunk=False)
-            for op, _, _, j1, j2 in sm.get_opcodes():
-                if op != "equal":
-                    changed.update(range(j1 + 1, max(j2, j1 + 1) + 1))
+            changed = changed_lines(old["lines"], lines)
         return p, text, lines, changed
 
     def _state(self, p, lines, syms):
@@ -447,8 +584,9 @@ class Reader:
             cop_order = [leaf[i] for i in np.argsort(-np.asarray(pc, float), kind="stable")]
             if self.mmr_beta > 0:
                 cop_order = self._mmr(p, lines, syms, leaf, pc, cop_order)
-        head = outline(text, p, syms)
-        inc, taken, cause = [False] * len(syms), [], [""] * len(syms)
+        head = outline(text, p, syms, None if not self.max_tokens else
+                       min(OUTLINE_MAX, max(full // 2, 400), self.max_tokens // 2))
+        inc, taken, cause, anchored = [False] * len(syms), [], [""] * len(syms), {}
         if self.policy == "rule_ab":
             leaf = [k for k, s in enumerate(syms) if not s.children]
             cost = [tokens("\n".join(lines[syms[k].start - 1:syms[k].end])) for k in leaf]
@@ -462,16 +600,37 @@ class Reader:
                 cause[leaf[i]] = "rule_ab"
                 taken.append((syms[leaf[i]].start, syms[leaf[i]].end))
         else:
-            budget, used, tau = max(self.budget_min, self.budget_frac * full), 0, self.tau_now()
+            budget, used, tau, spans = max(self.budget_min, self.budget_frac * full), 0, self.tau_now(), Spans()
+            if self.max_tokens:
+                budget = min(budget, self.max_tokens - tokens(head))
+            for ln in anchors(lines, syms, query) if self.anchor else ():
+                # the smallest leaf holding the line when it is cheap, else a window around it
+                k = min((k for k, s in enumerate(syms) if not s.children and s.start <= ln <= s.end),
+                        key=lambda k: syms[k].end - syms[k].start, default=None)
+                a, b = (syms[k].start, syms[k].end) if k is not None else (ln, ln)
+                if k is None or tokens("\n".join(lines[a - 1:b])) > min(self.anchor_max, budget / 3):
+                    top = self.focus and re.match(r"\s*(?:async\s+def|def|class)\s", lines[ln - 1])
+                    a, b = (ln, min(len(lines), ln + 5)) if top else (max(1, ln - 3), min(len(lines), ln + 3))
+                    k = None
+                cost = tokens("\n".join(lines[a - 1:b]))
+                if used + cost > budget or spans.overlaps(a, b):
+                    continue
+                used += cost
+                taken.append((a, b))
+                spans.add(a, b)
+                anchored[(a, b)] = ln
+                if k is not None:
+                    inc[k], cause[k] = True, "anchor"
             for k in sorted(range(len(syms)), key=lambda k: -P[k]):
                 s = syms[k]
                 if P[k] < tau or s.children:
                     continue
                 cost = tokens("\n".join(lines[s.start - 1:s.end]))
-                if used + cost > budget or any(not (s.end < a or s.start > b) for a, b in taken):
+                if used + cost > budget or spans.overlaps(s.start, s.end):
                     continue
                 inc[k], used, cause[k] = True, used + cost, "budget"
                 taken.append((s.start, s.end))
+                spans.add(s.start, s.end)
         # the coprocessor's own pick: its top-ranked symbols go up front when small, whatever the thresholds say (its
         # calibrated probabilities are honest but low, ~1-2 needed of 100+ symbols, so a threshold never lets it act)
         for k in cop_order[:self.coproc_top]:
@@ -481,7 +640,7 @@ class Reader:
             if tokens("\n".join(lines[s.start - 1:s.end])) <= self.coproc_max:
                 inc[k], cause[k] = True, "coproc_top"
                 taken.append((s.start, s.end))
-        parts = [head]
+        parts, first, wh = [head], [], Where(syms)
         st = self._state(p, lines, syms)
         st["shown"] = set()
         self.reads += 1
@@ -492,12 +651,22 @@ class Reader:
             if seen is not None and seen[1] == h:              # refractory: already in context, unchanged
                 parts.append(f"--- lines {a}-{b}: unchanged since read #{seen[0]} above ---")
             else:
-                parts.append(f"--- lines {a}-{b} ---\n" + body)
+                ln = anchored.get((a, b))
+                if self.focus and ln is not None:     # small models: what matches the request comes first
+                    s = wh.inner(a)
+                    if s is not None:                 # the enclosing def line on top: a raise shows whose it is
+                        body = numbered(lines, s.start, s.start) + "\n   ...\n" + body
+                    first.append(f"--- matches your request: lines {a}-{b}{wh(ln, ln)} ---\n" + body)
+                else:
+                    parts.append(f"--- lines {a}-{b}{wh(a, b)} ---\n" + body)
                 if self.refractory:
                     self.live[(p, a, b)] = (self.reads, h)
             st["shown"].update(range(a, b + 1))
             self._remember(idents("\n".join(lines[a - 1:b])), 0.5)
-            self._touch(p, a, b, 0.5)
+        self._touch_many(p, sorted(taken), 0.5)
+        if first:
+            top, _, rest = head.partition("\n")
+            parts = [top] + first + [rest] + parts[1:]
         if self.xray_top:
             parts += self._xray(syms, lines, inc, taken, query, cop_order or
                                 sorted((k for k, s in enumerate(syms) if not s.children), key=lambda k: -P[k]), st)

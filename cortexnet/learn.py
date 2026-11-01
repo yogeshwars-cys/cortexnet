@@ -17,6 +17,7 @@ Features per symbol (all available at read time):
   trail          decayed session memory of identifiers (queries, ranges, shown bodies): best name match + mean body match
   conn           symbol-graph activation from recently touched symbols: calls, called-by, body overlap, decayed by age
 """
+import bisect
 import json
 import math
 import os
@@ -56,13 +57,15 @@ def featurize(syms, lines, query, changed, asked, trail=None, active=(), key=Non
         for w in b:
             count[w] = count.get(w, 0) + 1
     X = np.zeros((len(syms), len(FEATURES)), np.float32)
+    changed = sorted(changed)
     for r, (s, b) in enumerate(zip(syms, bodies)):
         nm, parts = s.name.lower(), idents(s.name)
         X[r, 0] = float(bool(q) and (nm in q or (bool(parts) and parts <= q)))
         X[r, 1] = len(b & q) / max(len(b), 1) if q else 0.0
-        X[r, 2] = float(any(s.start <= ln <= s.end for ln in changed))
+        i = bisect.bisect_left(changed, s.start)
+        X[r, 2] = float(i < len(changed) and changed[i] <= s.end)
         X[r, 3] = math.log1p(sum(1 for (a, z) in asked if a <= s.end and z >= s.start))
-        X[r, 4] = math.log1p(sum(1 for o, ob in zip(syms, bodies) if o is not s and nm in ob))
+        X[r, 4] = math.log1p(count.get(nm, 0) - (nm in b))       # other symbols whose body names this one
         X[r, 5] = sum(1 for w in b if count.get(w, 0) == 1) / max(len(b), 1)
         X[r, 6] = math.log1p(sum(len(l) for l in lines[s.start - 1:s.end]) / 4)
         k = {"def": 7, "class": 8, "const": 9, "imports": 10}.get(s.kind, 11)

@@ -61,7 +61,7 @@ def source_files(root, exts=SRC_EXT):
     try:
         out = subprocess.run(["git", "-C", root, "ls-files", "-co", "--exclude-standard", "-z", "--", "."],
                              capture_output=True, check=True, timeout=30).stdout.decode("utf8", "replace")
-        return sorted(os.path.join(root, f) for f in out.split("\0")
+        return sorted(os.path.normpath(os.path.join(root, f)) for f in out.split("\0")
                       if f and os.path.splitext(f)[1].lower() in exts and os.path.isfile(os.path.join(root, f)))
     except (OSError, subprocess.SubprocessError):
         pass
@@ -237,7 +237,7 @@ class Session:
 
     def __init__(self, root, base, ctx, state):
         self.root, self.base, self.ctx = root, base, ctx
-        self.reader = Reader(state, split_tokens=600)
+        self.reader = Reader(state, split_tokens=600, max_tokens=ctx // 4)   # one read never fills the window
         files = [rel(p, root) for p in source_files(root)]
         listing = "\n".join(files[:200]) + (f"\n(+{len(files) - 200} more; use grep)" if len(files) > 200 else "")
         self.msgs = [{"role": "system", "content": SYSTEM.format(files=listing, example=files[0] if files else "")}]
@@ -296,14 +296,26 @@ class Session:
         self.msgs.append({"role": "user", "content": question})
         t0, ncalls, answer = time.time(), 0, ""
         for turn in range(max_calls + 1):
-            self.faded += watermark_fade(self.msgs, self.ratio * msg_tokens(self.msgs), self.ctx, self.outline_of,
-                                         scale=self.ratio)
-            sent = msg_tokens(self.msgs)
-            body = {"messages": [{k: v for k, v in m.items() if not k.startswith("_")} for m in self.msgs],
-                    "temperature": 0}
-            if ncalls < max_calls:
-                body["tools"] = TOOLS
-            r = post(self.base + "/v1/chat/completions", body)
+            for attempt in (0, 1):
+                # turns: in a long session the questions and answers themselves outgrow the window, so the oldest
+                # exchanges may go too once tool results cannot shrink any further
+                self.faded += watermark_fade(self.msgs, self.ratio * msg_tokens(self.msgs), self.ctx,
+                                             self.outline_of, scale=self.ratio, turns=True)
+                sent = msg_tokens(self.msgs)
+                body = {"messages": [{k: v for k, v in m.items() if not k.startswith("_")} for m in self.msgs],
+                        "temperature": 0}
+                if ncalls < max_calls:
+                    body["tools"] = TOOLS
+                try:
+                    r = post(self.base + "/v1/chat/completions", body)
+                    break
+                except RuntimeError as e:
+                    # too long: the server says how long the prompt really was; learn the ratio from it, so the
+                    # next fade sees the real size, and try once more
+                    m = re.search(r'"n_prompt_tokens":\s*(\d+)', str(e))
+                    if attempt or not m:
+                        raise
+                    self.ratio = max(self.ratio, int(m.group(1)) / max(sent, 1))
             n_in = (r.get("usage") or {}).get("prompt_tokens", 0)
             if n_in:
                 self.ratio = n_in / max(sent, 1)          # server tokens per estimated token (tokenizer + template)

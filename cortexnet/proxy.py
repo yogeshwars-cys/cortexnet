@@ -144,12 +144,32 @@ def classify(name, args, cwd=None):
     if not any(args.get(k) is not None for k in RANGE_KEYS):
         return "whole", path
     if isinstance(args.get("view_range"), list) and len(args["view_range"]) == 2:
-        a, b = args["view_range"]
-        return "range", path, int(a), int(b) if int(b) > 0 else 10 ** 9
-    a = int(args.get("offset") or args.get("start_line") or args.get("line_start") or args.get("StartLine") or 1)
-    if args.get("limit") is not None:
-        return "range", path, a, a + int(args["limit"]) - 1
-    return "range", path, a, int(args.get("end_line") or args.get("line_end") or args.get("EndLine") or 10 ** 9)
+        a, b = int(args["view_range"][0]), int(args["view_range"][1])
+        b = b if b > 0 else 10 ** 9
+    else:
+        a = int(args.get("offset") or args.get("start_line") or args.get("line_start") or args.get("StartLine") or 1)
+        if args.get("limit") is not None:
+            b = a + int(args["limit"]) - 1
+        else:
+            b = int(args.get("end_line") or args.get("line_end") or args.get("EndLine") or 10 ** 9)
+    if a <= 1 and b >= _file_lines(path):
+        return "whole", path                      # the window covers the whole file (agents with default limit/offset)
+    return "range", path, a, b
+
+
+def _file_lines(path):
+    """Line count of a file; +inf when it cannot be counted cheaply (large, missing, unreadable)."""
+    try:
+        if os.path.getsize(path) > 8 << 20:
+            return float("inf")
+        n, last = 0, b"\n"
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                n += chunk.count(b"\n")
+                last = chunk[-1:]
+        return n if last == b"\n" else n + 1
+    except OSError:
+        return float("inf")
 
 
 def _strings(x):
