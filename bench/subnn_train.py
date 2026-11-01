@@ -733,7 +733,7 @@ def main():
     print(f"{len(C)} cases, {emb.shape[0]} texts x {emb.shape[1]} ({enc_name}, {'cached' if cached else 'computed'}, "
           f"{time.time() - t0:.0f}s)", flush=True)
     emb_sym, codec = None, None
-    if a.codec:                 # symbols as codes, decoded; queries stay unquantised (asymmetric, as in wormhole)
+    if a.codec:                 # symbols as codes, decoded; queries stay unquantised (asymmetric)
         from cortexnet.codec import BitplaneCodec
         rows = np.unique(np.concatenate([f["rows"].ravel() for f in PREP.files.values()]))
         rows = torch.as_tensor(rows[rows >= 0])
