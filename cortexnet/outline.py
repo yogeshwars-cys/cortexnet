@@ -5,8 +5,10 @@ without paying for the bodies. Python goes through `ast`; other text files use l
 recognisable structure falls back to fixed-size sections labelled by their first line.
 """
 import ast
+import bisect
 import textwrap
 import re
+import warnings
 from dataclasses import dataclass, field
 
 
@@ -32,7 +34,9 @@ class Symbol:
 
 
 def _py(src, lines):
-    tree = ast.parse(src)
+    with warnings.catch_warnings():         # e.g. invalid escape sequences in old code: not the reader's to report
+        warnings.simplefilter("ignore", SyntaxWarning)
+        tree = ast.parse(src)
     out = []
 
     def head(node):
@@ -49,11 +53,17 @@ def _py(src, lines):
                 doc = (ast.get_docstring(node) or "").strip().split("\n")[0][:80]
                 kind = "class" if isinstance(node, ast.ClassDef) else "def"
                 sym = Symbol(node.name, kind, s, node.end_lineno, h, doc, depth)
-                sym.refs = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)} | \
-                           {n.attr for n in ast.walk(node) if isinstance(n, ast.Attribute)}
+                sym.refs = {n.id if isinstance(n, ast.Name) else n.attr for n in ast.walk(node)
+                            if isinstance(n, (ast.Name, ast.Attribute))}
                 out.append(sym)
                 if isinstance(node, ast.ClassDef) and depth < 1:
                     walk(node.body, depth + 1)
+            elif depth and isinstance(node, (ast.Assign, ast.AnnAssign)):   # class attributes (name = "design", ...)
+                tg = node.targets if isinstance(node, ast.Assign) else [node.target]
+                nm = ", ".join(t.id for t in tg if isinstance(t, ast.Name))
+                if nm:
+                    out.append(Symbol(nm, "const", node.lineno, node.end_lineno, lines[node.lineno - 1].strip()[:120],
+                                      depth=depth))
     imports = [n for n in tree.body if isinstance(n, (ast.Import, ast.ImportFrom))]
     if imports:
         names = []
@@ -120,7 +130,9 @@ COMPOUND = (ast.If, ast.For, ast.AsyncFor, ast.While, ast.With, ast.AsyncWith, a
 def _py_blocks(src_lines, s):
     """Statement groups inside a big Python function: compound statements stand alone, runs of simple ones merge."""
     try:
-        node = ast.parse(textwrap.dedent("\n".join(src_lines[s.start - 1:s.end]).expandtabs(4)))
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            node = ast.parse(textwrap.dedent("\n".join(src_lines[s.start - 1:s.end]).expandtabs(4)))
     except SyntaxError:
         node = None
     body = None
@@ -195,6 +207,21 @@ def split_big(syms, lines, path, min_tokens):
     return out
 
 
+def _mark_children(syms):
+    """s.children = some deeper symbol starts inside s's span: a range-max query over the symbols sorted by start
+    (a sparse table), so a file with tens of thousands of symbols stays linear-log instead of quadratic."""
+    order = sorted(syms, key=lambda s: s.start)
+    starts = [s.start for s in order]
+    table = [[s.depth for s in order]]
+    while 2 ** len(table) <= len(order):
+        prev, h = table[-1], 2 ** (len(table) - 1)
+        table.append([max(prev[i], prev[i + h]) for i in range(len(prev) - h)])
+    for s in syms:
+        lo, hi = bisect.bisect_left(starts, s.start), bisect.bisect_right(starts, s.end)
+        k = (hi - lo).bit_length() - 1
+        s.children = hi > lo and max(table[k][lo], table[k][hi - 2 ** k]) > s.depth
+
+
 def symbols(text, path="", split_tokens=0):
     lines = text.split("\n")
     syms = []
@@ -208,18 +235,115 @@ def symbols(text, path="", split_tokens=0):
     covered = sum(s.end - s.start + 1 for s in syms if s.depth == 0)
     if not syms or covered < 0.3 * len(lines):
         syms = sorted(syms + sections(lines), key=lambda s: (s.start, s.depth))
-    for s in syms:
-        s.children = any(c is not s and c.depth > s.depth and s.start <= c.start <= s.end for c in syms)
+    _mark_children(syms)
     if split_tokens:
         syms = split_big(syms, lines, path, split_tokens)
     return syms
 
 
-def outline(text, path="", syms=None):
+OUTLINE_MAX = 4000      # tokens: an outline never costs more than this, nor more than half the file
+
+
+def _cost(lines):
+    return sum(tokens(l) + 1 for l in lines)
+
+
+def _listing(group, depth, what, width):
+    """Lines of `name:line` entries for a group of symbols, each line at most `width` characters (0 = no limit)."""
+    head = f"{'  ' * depth}L{group[0].start}-{max(s.end for s in group)} {len(group)} {what}: "
+    items = [f"{s.name}:{s.start}" for s in group]
+    if not width:
+        return [head + ", ".join(items)]
+    out, cur = [], head
+    for k, it in enumerate(items):
+        if len(cur) + len(it) + 2 > width and cur != head:
+            if len(out) + 1 >= max(1, width // 40):           # this group's share of the budget is used up
+                out.append(cur.rstrip(", ") + f", ... {len(items) - k} more")
+                return out
+            out.append(cur.rstrip(", "))
+            cur = f"{'  ' * (depth + 1)}"
+        cur += it + ", "
+    out.append(cur.rstrip(", "))
+    return out
+
+
+def _kind_word(group):
+    kinds = dict.fromkeys(s.kind for s in group)
+    return f"{next(iter(kinds))}s" if len(kinds) == 1 else "symbols"
+
+
+def fold(syms, max_tokens):
+    """Outline lines that fit in max_tokens, giving up the least useful detail first: sub-blocks; then the
+    signatures of a class's members (kept as `name:line`, enough to ask for a range); then runs of same-kind
+    top-level symbols (listed the same way); then the length of every list, trimmed evenly. Returns (lines, folded)."""
+    lines = [s.label() for s in syms]
+    if _cost(lines) <= max_tokens:
+        return lines, False
+    syms = [s for s in syms if s.kind != "block"]
+    lines = [s.label() for s in syms]
+    if _cost(lines) <= max_tokens:
+        return lines, True
+    groups, k = [], 0                   # (top-level symbol, its members) in file order
+    while k < len(syms):
+        j = k + 1
+        while j < len(syms) and syms[j].depth > syms[k].depth and syms[j].start <= syms[k].end:
+            j += 1
+        groups.append((syms[k], syms[k + 1:j]))
+        k = j
+
+    def render(width, runs):
+        out, i = [], 0
+        while i < len(groups):
+            top, members = groups[i]
+            j = i + 1
+            if runs and not members:            # a run of 3+ same-kind top-level symbols without members
+                while j < len(groups) and not groups[j][1] and groups[j][0].kind == top.kind:
+                    j += 1
+            if j - i >= 3:
+                run = [g[0] for g in groups[i:j]]
+                out += _listing(run, 0, _kind_word(run), width)
+            else:
+                j = i + 1
+                out.append(top.label())
+                if len(members) <= 2:                   # a listing would save nothing
+                    out += [m.label() for m in members]
+                else:
+                    out += _listing(members, top.depth + 1, "members", width)
+            i = j
+        return out
+    for runs in (False, True):
+        lines = render(0, runs)
+        if _cost(lines) <= max_tokens:
+            return lines, True
+    lo, hi, best = 40, 4000, None                # the widest list lines that still fit
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        cand = render(mid, True)
+        if _cost(cand) <= max_tokens:
+            best, lo = cand, mid + 1
+        else:
+            hi = mid - 1
+    if best is None:                             # not even one short line per group: fixed groups of symbols
+        top = [g[0] for g in groups]
+        per = max(3, -(-len(top) // max(1, max_tokens // 50)))
+        best = [l for k in range(0, len(top), per) for l in _listing(top[k:k + per], 0, _kind_word(top[k:k + per]), 120)]
+        while best and _cost(best) > max_tokens:
+            best.pop()
+    return best, True
+
+
+def outline(text, path="", syms=None, max_tokens=None):
+    """max_tokens: fold the outline to fit (default: OUTLINE_MAX, and at most half the file, or 400 tokens for small
+    files); 0 = never fold."""
     syms = syms if syms is not None else symbols(text, path)
     n = text.count("\n") + 1
-    head = f"{path or '<file>'}: {n} lines, ~{tokens(text)} tokens. Outline (ask for line ranges to see bodies):"
-    return "\n".join([head] + [s.label() for s in syms])
+    full = tokens(text)
+    cap = min(OUTLINE_MAX, max(full // 2, 400)) if max_tokens is None else max_tokens
+    lines, folded = fold(syms, cap) if cap else ([s.label() for s in syms], False)
+    how = (f"folded to ~{cap} tokens: runs of symbols are listed by name, ask for line ranges to see more"
+           if folded else "ask for line ranges to see bodies")
+    head = f"{path or '<file>'}: {n} lines, ~{full} tokens. Outline ({how}):"
+    return "\n".join([head] + lines)
 
 
 FLOW = re.compile(r"^\s*(if|elif|else|for|while|try|except|finally|with|return|raise|yield|match|case|switch|catch|"

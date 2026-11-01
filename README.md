@@ -95,6 +95,61 @@ public SWE-bench Lite tasks.
 
 ## Results
 
+### Held-out stress test: unseen repositories, machine-written questions (`bench/heldout.py`)
+
+The hand-written 20 questions below were about this repository, by the people who tuned the reader on them. This test
+removes both: `bench/heldout.py gen` writes the questions from the AST of package subtrees of SWE-bench Lite
+repositories (pinned commits), keeping only facts with one unambiguous answer (a parameter default, a constant, which
+function raises a given message, a class's base), graded by a regular expression. Each subtree is one conversation of
+40 questions in a row per arm. Models run in llama.cpp on Modal (`bench/modal_llamacpp.py`: the laptop's GGUF and
+build, one server per context size whose slots are exactly that context, so an overflow fails as it does on a laptop).
+
+Arms, every one with the same per-read cap (a quarter of the window): **paged** is the usual agent file tool without
+CortexNET (the first page of lines, then line ranges), **cortex** is CortexNET reads, **+fade** adds the watermark fade.
+Whole-file reads are left out of the tables: they overflowed on question 1 at every context size, 32k included (the
+model opens two big files at once).
+
+**Protocol.** The first set (v1, 8 subtrees) found where CortexNET lost; the reader was changed after studying those
+failures, so v1 became the development set. The table is the test set (v2): 8 other subtrees nobody had looked at,
+half the questions naming code without backticks. Llama 3.1 8B Q4_K_M, 320 questions per context, one run each, 95%
+intervals from paired bootstraps over questions (`bench/results/heldout_v2.md`):
+
+| context | paged + fade | CortexNET + fade, anchors off | **CortexNET + fade** | CortexNET + fade minus paged + fade |
+|---|---|---|---|---|
+| 8k | 35% | 54% | **66%** | **+31 points [+24, +38]** |
+| 16k | 43% | 58% | **77%** | **+34 points [+28, +40]** |
+| 32k | 55% | 61% | **76%** | **+21 points [+15, +27]** |
+
+- **What was losing (v1):** most wrong answers were one read and a guess. The first CortexNET read showed the answer
+  for 73% of the questions and for none of the 66 "which function raises this message" questions; an 8B model does
+  not follow up with `read_lines`, it guesses. **Anchored reads** fix it: the lines holding the request's quoted text
+  or code names (`Index.suffix`, `compute_hash`) always come with the read (`anchors()` in `cortexnet/reader.py`), and
+  class attributes are in the Python outline. Without a model, the first read now shows the answer for 99-100% of the
+  questions on both sets (`heldout.py offline`); live, anchors add 12-19 points (the anchors-off column).
+- On v1, with the reader before these changes: CortexNET + fade 68% vs paged + fade 43% at 16k (+26 [+19, +34]),
+  63% vs 50% at 32k (+14 [+7, +20]) (`bench/results/heldout.md`).
+- Fade is what lets any arm survive a 40-question session: without it every arm overflowed partway (paged at question
+  2-3, CortexNET at question 5-16).
+
+**Small Meta models, long sessions** (v3: 8 more unseen subtrees, up to 60 questions per session, 364 questions,
+`bench/results/heldout_v3.md`):
+
+| model, context | paged + fade | **CortexNET + fade** | difference |
+|---|---|---|---|
+| Llama 3.2 3B, 16k | 14% | **54%** | +40 points [+34, +45] |
+| Llama 3.2 3B, 8k | 8% | **40%** | +32 points [+26, +37] |
+| Llama 3.2 3B, 8k, pre-read + turn fade | 18% | **59%** | +41 points [+35, +46] |
+| Llama 3.2 1B, 8k | 7% | 6% | n.s.: the 1B made no tool calls |
+| Llama 3.2 1B, 8k, pre-read + turn fade | 6% | **23%** | +17 points [+12, +21] |
+
+- **Pre-read** (harness option): the files a question names are read through the arm's own tool before the model's
+  first turn, as if it had asked; the 1B otherwise never calls a tool, so no read tool can help it.
+- **Turn fade** (`watermark_fade(turns=True)`, on in `cortexnet local`): over 60 questions the questions and answers
+  themselves outgrow an 8k window, which fading tool results cannot fix; when nothing else is left the oldest whole
+  exchanges go. With it, no session lost a question to an overflow.
+- Two-file questions (follow a call or a base class into another file, 20 of the 364) stay unsolved for small models
+  in every arm (at best 3 of 20): too few to compare, and the open problem for small-model workflows.
+
 ### Meta's models: Muse Spark, Llama 3.3 70B, Llama 4 Maverick (`bench/results/debut.md`)
 
 Same model in every arm, only the read tool changed. Session A/B: 20 code questions in one conversation per arm.
@@ -127,10 +182,10 @@ session (`bench/live_ab.py --session`, reports `bench/results/live_ab_llama_3_1_
 |---|---|---|---|---|---|---|
 | whole-file reads | 0/20 | question 1 (`reader.py` whole = 15.8k tokens) | - | - | - | - |
 | CortexNET reads | 6/20 | question 9 (dead after) | - | - | - | - |
-| **CortexNET + fade** | **13/20** | never | 229k | 30 | 63k | 204 s |
+| **CortexNET + fade** | **13/20** | never | 207k | 25 | 46k | 201 s |
 
-- Fade is what keeps a session alive at 8k: the fade arm answered all 20 questions without an overflow, at a median
-  5.2k and at most 6.8k tokens of context.
+- Fade is what keeps a session alive at 8k: the fade arm answered all 20 questions without an overflow, at a mean
+  4.8k and at most 6.8k tokens of context (report `..._session8k_final.md`).
 - Accuracy moves with run-to-run noise: llama.cpp is not bit-reproducible here, and the same arm moved by up to 4
   answers between runs at temperature 0.
 - How it runs: 5.84 of 6.14 GB VRAM (about 4.4 GB weights, 1.0 GB KV cache reserved for the 8k window, 0.4 GB
@@ -174,6 +229,11 @@ watermark. One whole-file episode ran the 80 GB GPU out of memory (`swe_incident
 | option | what it does | measured |
 |---|---|---|
 | `cortexnet.fade.watermark_fade` | one fade batch near the context limit, cache-friendly | keeps 8k sessions alive (laptop table) |
+| `Reader(anchor=True)` (on) | lines holding the request's quoted text or code names always come with the read | +12 to +19 points on unseen repositories (held-out table) |
+| `Reader(max_tokens=...)` (`cortexnet local` and the CLI: a quarter of the window; MCP: `CORTEXNET_MAX_READ`) | caps one read: outline at most half, bodies the rest | without it one read of a big file filled an 8k window and ended the session |
+| outline folding (on) | an outline longer than 4,000 tokens or half its file folds members and runs of symbols into `name:line` lists | constant-heavy modules and heading-heavy docs read at up to 1.9x their size before; the files of the earlier benchmarks are below the threshold |
+| `watermark_fade(turns=True)` (on in `cortexnet local`) | when tool results cannot shrink enough, the oldest whole exchanges go | no overflow in any 60-question small-model session |
+| `Reader(focus=True)` | anchored lines first, above the outline, with their function's `def` line | mixed: +12 points (3B, 16k), -8 (3B, 8k with pre-reads): off by default |
 | `Reader(xray_top=2)` | skeletons of big symbols: signature, lines with the query's rare words, control-flow spine (`outline.skeleton`) | +0.029 gold-line recall for ~300 tokens per read (`read_eval.md`) |
 | proxy `--shell` | outlines long shell outputs of log-like commands (tests, builds, installs); search results, diffs, listings and printed values are never touched (`cortexnet/shellout.py`) | on 3,203 logged long outputs: the safe rule outlines 1% (saves ~1%); outlining every command saves 36% but hides a third of the words the agent used next (`bench/results/shell_eval.md`), so it is off by default |
 | `cortex` spiking file manager (on; `--no-snn` / `CORTEXNET_SNN=0` turns it off) | leaky integrate-and-fire neurons pick the files to warm ahead of the model (below) | replay hit@3 equal to "named file, then recency"; predicts 55% (Llama) / 4% (Claude) of the files the model had not opened yet |
@@ -244,6 +304,21 @@ Measured, see `bench/results/` and the log of every run:
   then flipped its first action in every arm and scored 0/20. `bench/live_ab.py --fixture-ref <commit>` pins the
   workspace to a commit and `--hint` adds a call example. In session mode on the Meta API the harness chained only
   tool outputs, so questions 2-20 never reached the model; fixed before the runs above.
+- **Engine stress test** (`bench/stress_engine.py`, `bench/results/stress_engine.md`: pathological files, 3,000 files of
+  five real repositories, the MCP server under a burst of 2,000 calls with malformed input). Found and fixed: four
+  quadratic loops (a file with 6,000 classes took 73 s to read and 38 s to re-read after an edit; now a few seconds,
+  outputs unchanged, checked on 2,432 real files); outlines larger than their file; a single `null` line on stdin
+  killed the MCP server and every call after it. Now every case passes; on real code no read is larger than the whole
+  file, median read 103 ms, p99 302 ms.
+- **Fade dead ends, fixed.** An agent paging through one big file has only recent reads, which the fade protected, so
+  it overflowed; one result bigger than the window was "the newest result", protected forever. The fade now squeezes
+  them when, and only when, the context would overflow anyway.
+- **Harness pitfalls in the held-out runs, fixed or controlled:** llama.cpp rejects a malformed tool call from a small
+  model with HTTP 500 (`bench/heldout.py` retries once with `tool_choice: required`, every arm alike); a dropped connection
+  crashed a session (now retried; a session is written only when it completes); queued sessions would have loaded the
+  reader changed mid-run (only sessions that started before the change are in the v1 tables; v2 ran on one version).
+- **Focus mode** (anchored lines above the outline) did not help reliably: +12 points for the 3B at 16k, -8 with
+  pre-reads at 8k, n.s. for the 1B. Off by default.
 
 ## Use
 
@@ -373,10 +448,12 @@ rewriting, for A/B baselines. Logs usage numbers only, never request bodies.
 | `bench/live_ab.py` | live A/B: same agent and questions, any set of arms, one question at a time or `--session`; local transformers, any OpenAI-compatible server, or the Meta Model API |
 | `bench/swe_api.py`, `bench/modal_vllm.py` | SWE-bench Lite agent through a chat API (Baseten, Meta API, any OpenAI-compatible server); a big open model behind vLLM on Modal |
 | `bench/swe_agent.py`, `bench/modal_glimmer.py`, `bench/swe_ab_report.py` | Glimmer 30B as a coding agent on SWE-bench Lite (Modal), probes, report |
+| `bench/heldout.py`, `bench/modal_llamacpp.py` | held-out sessions: machine-written questions over unseen repositories (`gen`, `run`, `report`, `offline`); Llama 3.1 8B / 3.2 3B / 3.2 1B in llama.cpp on Modal |
+| `bench/stress_engine.py` | engine stress test: pathological files, whole repositories, the MCP server under abuse |
 | `bench/proxy_ab.py` | proxy A/B on a real agent CLI (Claude Code, Codex, Antigravity): rewriting vs passthrough |
 | `bench/files_replay.py`, `bench/working_set.py` | spiking file manager on real file-operation streams; working-set statistics |
 | `bench/shell_eval.py`, `bench/replay_edits.py`, `bench/replay_sessions.py` | offline studies over local session logs (aggregates only) |
-| `bench/results/` | result tables (`debut.md`: the Meta and Llama 3.3 70B runs) |
+| `bench/results/` | result tables (`debut.md`: the Meta and Llama 3.3 70B runs; `heldout*.md`: the held-out sessions; `stress_engine.md`) |
 | `docs/coprocessor.md` | the experimental learned body picker (Cortex-SubNN), symbol graph and menu, and their studies |
 | `docs/readme/` | the README art; `src/` holds the HTML sources and `render.py`, which renders them to PNG with Chrome |
 | `scripts/make_banner.py` | builds the CLI's pixel-art logo (`cortexnet/assets/brain.ans`) from `docs/cortex_logo.png` |

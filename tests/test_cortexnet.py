@@ -77,6 +77,28 @@ class OutlineTest(unittest.TestCase):
         s = symbols("def broken(:\n    pass\n" * 30, "b.py")
         self.assertTrue(len(s) > 0)
 
+    def test_huge_outlines_fold_to_their_budget_and_keep_line_numbers(self):
+        consts = "\n".join(f"K{i} = {i}" for i in range(3000))      # the outline would cost more than the file
+        out = outline(consts, "c.py")
+        self.assertLessEqual(len(out) // 4, len(consts) // 4 // 2 + 60)
+        self.assertIn("folded", out.split("\n")[0])
+        self.assertIn("K0:1", out)                                   # names with lines, enough to ask for a range
+        cls = "class Big:\n" + "".join(f"    def m{i}(self, a, b, c):\n        return a + {i}\n" for i in range(300))
+        out = outline(cls, "b.py", max_tokens=300)
+        self.assertIn("L1-601 class Big:", out)
+        self.assertIn("m0:2", out)
+        self.assertNotIn("def m0(self", out)                         # signatures are the first detail to go
+        self.assertEqual(outline(PY, "m.py", max_tokens=0), outline(PY, "m.py", max_tokens=10 ** 6))
+        self.assertNotIn("folded", outline(big_py(), "big.py"))      # an ordinary file is never folded
+
+    def test_thousands_of_symbols_stay_fast(self):
+        import time
+        src = "".join(f"class C{i}:\n    def f(self):\n        return {i}\n" for i in range(4000))
+        t = time.perf_counter()
+        syms = symbols(src, "m.py")
+        self.assertLess(time.perf_counter() - t, 5.0)                # the nesting check was quadratic (minutes)
+        self.assertTrue(all(s.children for s in syms if s.kind == "class"))
+
 
 class ReaderTest(unittest.TestCase):
     def setUp(self):
@@ -115,6 +137,12 @@ class ReaderTest(unittest.TestCase):
         self.assertTrue(any(e["op"] == "range" and e["miss"] for e in ev))
         self.assertTrue(os.path.exists(os.path.join(self.dir, "state", "include.json")))
 
+    def test_max_tokens_caps_one_read(self):
+        _w(self.big, big_py(400))
+        out = Reader(os.path.join(self.dir, "s2"), max_tokens=600).read(self.big, query="func_42 item")
+        self.assertLessEqual(len(out) // 4, 600 + 40)
+        self.assertGreater(len(Reader(os.path.join(self.dir, "s3")).read(self.big, query="func_42 item")) // 4, 900)
+
     def test_changed_lines_are_detected(self):
         self.r.read(self.big)
         src = big_py().replace("v = a * 30 + b", "v = a * 30 - b")
@@ -143,6 +171,13 @@ class ServerTest(unittest.TestCase):
             self.assertIn("L18-19 def helper", resp[2]["result"]["content"][0]["text"])
             self.assertIn("return Cache().get(x) + y", resp[3]["result"]["content"][0]["text"])
             self.assertEqual(resp[4]["error"]["code"], -32601)
+            # malformed lines get an error each and the server keeps serving (a null line used to kill it)
+            out = io.StringIO()
+            bad = ["null", "42", "[]", "{not json", json.dumps(reqs[3])]
+            serve(io.StringIO("\n".join(bad) + "\n"), out)
+            resp = [json.loads(l) for l in out.getvalue().splitlines()]
+            self.assertEqual([r.get("error", {}).get("code") for r in resp[:4]], [-32600, -32600, -32600, -32700])
+            self.assertIn("L18-19 def helper", resp[4]["result"]["content"][0]["text"])
             del os.environ["CORTEXNET_STATE"]
 
 

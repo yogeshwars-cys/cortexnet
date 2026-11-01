@@ -38,6 +38,13 @@ TOOLS = [
 ]
 
 
+def ids(x):
+    """Menu ids as a list, whatever shape a client sent: "#2", 2, ["#2"], or nothing."""
+    if not x:
+        return []
+    return [str(i) for i in x] if isinstance(x, (list, tuple)) else [str(x)]
+
+
 def handle(reader, req):
     m, params = req.get("method"), req.get("params") or {}
     if m == "initialize":
@@ -51,18 +58,18 @@ def handle(reader, req):
         name, a = params.get("name"), params.get("arguments") or {}
         try:
             if name == "cortex_read":
-                text = reader.read(a["path"], a.get("query", ""), a.get("approve") or ())
+                text = reader.read(a["path"], a.get("query", ""), ids(a.get("approve")))
             elif name == "cortex_range":
-                text = reader.range(a["path"], a["start"], a["end"], a.get("approve") or ())
+                text = reader.range(a["path"], a["start"], a["end"], ids(a.get("approve")))
             elif name == "cortex_approve":
-                text = reader.approve(a["ids"])
+                text = reader.approve(ids(a["ids"]))
             elif name == "cortex_outline":
                 text = reader.outline(a["path"])
             elif name == "cortex_stats":
                 text = reader.stats()
             else:
                 return {"content": [{"type": "text", "text": f"unknown tool {name}"}], "isError": True}
-        except (OSError, KeyError, ValueError) as e:
+        except (OSError, KeyError, ValueError, TypeError) as e:
             return {"content": [{"type": "text", "text": f"{type(e).__name__}: {e}"}], "isError": True}
         return {"content": [{"type": "text", "text": text}], "isError": False}
     raise LookupError(m)
@@ -71,7 +78,8 @@ def handle(reader, req):
 def options(env=os.environ):
     """Opt-in extras: CORTEXNET_COPROC=<exported head .npz> (needs torch + transformers for MiniLM),
     CORTEXNET_POLICY=rule_ab, CORTEXNET_GRAPH=1, CORTEXNET_MENU=1 (connected symbols from neighbouring files),
-    CORTEXNET_CTX_BASE=<tokens of context before the first read>. COPROC + GRAPH + MENU = the measured full system."""
+    CORTEXNET_CTX_BASE=<tokens of context before the first read>, CORTEXNET_MAX_READ=<tokens one read may return>.
+    COPROC + GRAPH + MENU = the measured full system."""
     kw = dict(policy=env.get("CORTEXNET_POLICY", "budget"), ctx_base=int(env.get("CORTEXNET_CTX_BASE", "20000")))
     if env.get("CORTEXNET_MENU") == "1":
         kw["menu"] = True
@@ -88,6 +96,8 @@ def options(env=os.environ):
         state = env.get("CORTEXNET_STATE") or os.path.join(os.getcwd(), ".cortexnet")
         path = os.path.join(state, "graph.npz")
         kw["graph"] = CoNeedGraph.load(path) if os.path.exists(path) else CoNeedGraph()
+    if env.get("CORTEXNET_MAX_READ"):                       # tokens one read may return (e.g. a quarter of a small
+        kw["max_tokens"] = int(env["CORTEXNET_MAX_READ"])  # model's context window)
     return kw
 
 
@@ -102,6 +112,11 @@ def main(stdin=sys.stdin, stdout=sys.stdout):
             req = json.loads(line)
         except ValueError:
             stdout.write(json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "parse error"}}) + "\n")
+            stdout.flush()
+            continue
+        if not isinstance(req, dict):           # valid JSON but not a request object (null, 42, [...])
+            stdout.write(json.dumps({"jsonrpc": "2.0", "id": None,
+                                     "error": {"code": -32600, "message": "invalid request"}}) + "\n")
             stdout.flush()
             continue
         if "id" not in req:

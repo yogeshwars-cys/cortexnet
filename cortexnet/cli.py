@@ -315,7 +315,7 @@ class Workspace:
 
     def symbol_list(self, path):
         """[(start, end, label)] in the outline's order; /outline numbers them from 1 for `read N`."""
-        head = self.outline_of(path)
+        head = self.outline_of(path, fold=False)
         if head is None:
             raise ValueError(f"cannot outline {path}")
         rows = []
@@ -363,14 +363,15 @@ class Workspace:
             text = text[:6000] + f"\n[... {len(text) - 12000} characters omitted ...]\n" + text[-6000:]
         return f"exit code {code}\n{short or text}"
 
-    def outline_of(self, path):
+    def outline_of(self, path, fold=True):
+        """fold=False: every symbol on its own row (the /outline listing a person numbers for `read N`)."""
         try:
             p = self.path(path)
             with open(p, encoding="utf8", errors="replace") as f:
                 text = f.read()
         except (OSError, ValueError):
             return None
-        return outline(text, self.rel(p), symbols(text, p, split_tokens=600))
+        return outline(text, self.rel(p), symbols(text, p, split_tokens=600), None if fold else 0)
 
 
 # ---------------------------------------------------------------- model backends
@@ -1191,7 +1192,7 @@ def main(argv=None):
             from .graph import CoNeedGraph
             kw.update(graph=CoNeedGraph(), menu=True)
     ui = make_ui(a.plain, history=os.path.join(root, ".cortexnet", "cli_history"), commands=COMMANDS)
-    ws = Workspace(root, Reader(os.path.join(root, ".cortexnet", "agent"), **kw),
+    ws = Workspace(root, Reader(os.path.join(root, ".cortexnet", "agent"), max_tokens=a.ctx // 4, **kw),
                    confirm=(lambda q, d: True) if a.yes else ui.confirm)
     tools = [t for t in TOOLS if t["function"]["name"] not in MUTATING] if a.plan else TOOLS
     agent = Agent(backend, ws, ctx=a.ctx, max_steps=a.max_steps, ui=ui, tools=tools,

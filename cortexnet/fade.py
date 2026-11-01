@@ -10,6 +10,9 @@ What shrinks, oldest first, never the reads of files touched in the last `keep` 
   1. superseded reads: a read_file of a path that is read_file'd again later (the later copy carries it) -> a one-line
      pointer. With outline-first reads this is most of the waste in a long session (the same file read per question).
   2. stale reads: read_file / read_lines of a file not touched recently -> the file's outline (if shorter).
+  3. only if 1-2 leave the context above the high mark: older reads of recently touched files too, and the newest
+     result only if the context would overflow with it. An agent paging through one big file has nothing but recent
+     reads, and one oversized newest result would otherwise block every later request of the session.
 
 Order inside each pass: oldest first (order="age", the default), or order="charge": every result keeps a leaky
 relevance charge, +1 for each later tool call that touches its file (by path or file name in the call's arguments),
@@ -72,9 +75,13 @@ def charges(res, leak=0.8):
     return out
 
 
-def _plan(msgs, est_tokens, limit, outline_of, low, keep, keep_frac, scale, pinned, order="age", leak=0.8):
+def _plan(msgs, est_tokens, limit, outline_of, low, keep, keep_frac, scale, pinned, order="age", leak=0.8,
+          squeeze_above=None):
     """The batch a fade from est_tokens down to low * limit would apply, in order:
-    [(kind, tool message, name, path, new content, tokens saved)]. Changes nothing."""
+    [(kind, tool message, name, path, new content, tokens saved)]. Changes nothing.
+    squeeze_above: if the usual passes leave the estimate above this, a last pass (3) may shrink older results of
+    recently touched files too, oldest first (the newest result only if the estimate is still over the limit): an
+    agent paging through one big file has only recent reads, and without it the session overflows."""
     res = tool_results(msgs)
     last_k, used = set(), 0
     for j in range(len(res) - 1, max(-1, len(res) - 1 - keep), -1):
@@ -103,13 +110,20 @@ def _plan(msgs, est_tokens, limit, outline_of, low, keep, keep_frac, scale, pinn
             cands.append((0, j))                               # a later copy exists: eligible even if recent or pinned
         elif j not in last_k and path not in recent and path not in pinned:
             cands.append((2 if content.startswith(MARK) else 1, j))
+    squeeze = [(3, j) for j, (m, name, args) in enumerate(res)
+               if name in FADE_TOOLS and args.get("path") and args.get("path") not in pinned
+               and all(c[1] != j for c in cands) and not (m.get("content") or "").startswith(MARK)]
     est, plan = est_tokens, []
     if order == "charge":
         q = charges(res, leak)
         cands = sorted(cands, key=lambda c: (c[0], q[c[1]], c[1]))
-    for kind, j in sorted(cands) if order != "charge" else cands:
+    for n, (kind, j) in enumerate((sorted(cands) if order != "charge" else cands) + squeeze):
         if est <= low * limit:
             break
+        if kind == 3 and (n == 0 or squeeze[0] == (kind, j)) and (squeeze_above is None or est <= squeeze_above):
+            break                                              # the usual passes were enough: no squeeze
+        if kind == 3 and j == len(res) - 1 and est <= limit:
+            break                                              # the newest result goes only if it cannot fit at all
         m, name, args = res[j]
         path, content = args.get("path"), m.get("content") or ""
         new = f"{MARK}{path}; read it again if you need it]"
@@ -117,7 +131,7 @@ def _plan(msgs, est_tokens, limit, outline_of, low, keep, keep_frac, scale, pinn
             new = f"{MARK}an older task card; the newest card is below]"
         elif kind == 0:
             new = f"{MARK}{path}; superseded by a later read of the same file]"
-        elif kind == 1:
+        elif kind in (1, 3):
             head = outline_of(path)
             if head is not None and 2 * len(head) < len(content):
                 new = f"{MARK}{path}; its outline is below, use read_lines for any body]\n{head}"
@@ -128,23 +142,53 @@ def _plan(msgs, est_tokens, limit, outline_of, low, keep, keep_frac, scale, pinn
     return plan
 
 
+def msg_cost(m):
+    """tokens() of one chat message: its text plus its tool calls' arguments."""
+    return tokens(str(m.get("content") or "")) + sum(tokens((c.get("function") or {}).get("arguments") or "") + 8
+                                                    for c in m.get("tool_calls") or [])
+
+
+def drop_turns(msgs, need, scale=1.0):
+    """Delete whole exchanges (a user message and everything up to the next user message), oldest first, until
+    `need` tokens are saved; the system message and the latest exchange always stay. Returns (removed, saved)."""
+    users = [i for i, m in enumerate(msgs) if m.get("role") == "user"]
+    removed, saved, cut = 0, 0.0, None
+    for a, b in zip(users, users[1:]):
+        if saved >= need:
+            break
+        saved += scale * sum(msg_cost(m) for m in msgs[a:b])
+        removed += b - a
+        cut = b
+    if cut is not None:
+        del msgs[users[0]:cut]
+    return removed, saved
+
+
 def watermark_fade(msgs, est_tokens, limit, outline_of, mark=0.85, low=0.5, keep=4, keep_frac=0.25, scale=1.0,
-                   pinned=(), order="age", leak=0.8, on_fade=None):
+                   pinned=(), order="age", leak=0.8, on_fade=None, turns=False):
     """Shrink in place if est_tokens > mark * limit, oldest first, until the estimate is below low * limit.
     outline_of(path) -> outline text, or None to leave that read; scale: server tokens per tokens() unit, so the
     running estimate stays in the server's units. Returns the number of messages changed.
     Protected: the newest result always, and the newest `keep` results while their total stays within
     keep_frac * limit (a count alone let one 3.4k-token outline block every batch in the 8k laptop session).
     pinned: paths whose reads stay as they are (only a copy superseded by a later read of the same path may go).
-    on_fade(path): called for every read shrunk (e.g. Reader.forget, so its bodies may be sent again)."""
+    on_fade(path): called for every read shrunk (e.g. Reader.forget, so its bodies may be sent again).
+    turns: if shrinking tool results still leaves the estimate above the high mark, delete the oldest whole exchanges
+    too (drop_turns). Over a long session the questions and answers themselves outgrow a small window; fading only
+    tool results cannot stop that."""
     if est_tokens <= mark * limit:
         return 0
-    plan = _plan(msgs, est_tokens, limit, outline_of, low, keep, keep_frac, scale, set(pinned), order, leak)
+    plan = _plan(msgs, est_tokens, limit, outline_of, low, keep, keep_frac, scale, set(pinned), order, leak,
+                 squeeze_above=mark * limit)
     for _, m, name, path, new, _ in plan:
         m["content"] = new
         if on_fade is not None and path and name in FADE_TOOLS:
             on_fade(path)
-    return len(plan)
+    est = est_tokens - sum(p[5] for p in plan)
+    removed = 0
+    if turns and est > mark * limit:
+        removed, _ = drop_turns(msgs, est - low * limit, scale)
+    return len(plan) + removed
 
 
 def preview(msgs, est_tokens, limit, outline_of, mark=0.85, low=0.5, keep=4, keep_frac=0.25, scale=1.0, pinned=(),
@@ -152,7 +196,7 @@ def preview(msgs, est_tokens, limit, outline_of, mark=0.85, low=0.5, keep=4, kee
     """What the next fade would do, without changing anything. A fade starts at mark * limit, so this plans from
     there (or from est_tokens if already above it). Returns [dict(path, what, saved)] in the order it would apply."""
     plan = _plan(msgs, max(est_tokens, mark * limit), limit, outline_of, low, keep, keep_frac, scale, set(pinned),
-                 order, leak)
+                 order, leak, squeeze_above=mark * limit)
     out = []
     for kind, _, name, path, new, saved in plan:
         what = ("older task card" if name in PIN_TOOLS else "superseded" if kind == 0
