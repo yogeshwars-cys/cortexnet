@@ -68,7 +68,7 @@
         <p class="k">way in</p>
         <div class="item"><b>Python library</b><span>Reader, watermark_fade</span></div>
         <p class="k">model</p>
-        <div class="item"><b>llama.cpp on the same machine</b><span>tested: Llama 3.1 8B on a 6 GB laptop GPU, 8k context</span></div>
+        <div class="item"><b>llama.cpp on the same machine</b><span>tested: Llama 3.1 8B on a 6 GB laptop GPU, 8k context; Llama 3.1 8B, 3.2 3B and 3.2 1B at 8k to 32k on cloud GPUs</span></div>
         <p class="k">runs out of</p>
         <p class="limit">the context window, KV-cache memory and prefill time</p>
       </div>
@@ -77,8 +77,8 @@
 
       <div class="core">
         <h2>CortexNET core</h2>
-        <div class="item"><b>Reads</b><span>outline + the bodies an include model picks; small files whole</span></div>
-        <div class="item"><b>Context</b><span>watermark fade: at 85%, stale reads become outlines, down to 50%, in one batch</span></div>
+        <div class="item"><b>Reads</b><span>outline + the lines the request names + the bodies an include model picks; at most a quarter of the window; small files whole</span></div>
+        <div class="item"><b>Context</b><span>watermark fade: at 85%, stale reads become outlines, down to 50%, in one batch; when nothing else fits, the oldest exchanges go too</span></div>
         <div class="item"><b>Anticipation</b><span>a spiking file manager predicts the next files</span></div>
         <div class="item"><b>Learning</b><span>every range read is a miss that trains the include model, kept across sessions</span></div>
         <p class="foot"><b>It never calls your model.</b> It shapes the reads the model is given.</p>
