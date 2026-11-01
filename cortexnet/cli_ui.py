@@ -207,16 +207,31 @@ class RichUI(PlainUI):
         self.console = console or Console(highlight=False)
         self.stats = dict(context=0, ctx=1, faded=0, saved=0)
         self.inp, self.session, self.depth = inp, None, 0
+        self.paths = None                         # callable listing the repository's files, for `@` completion
         if inp is None:
             try:
                 from prompt_toolkit import PromptSession
                 from prompt_toolkit.history import FileHistory
+                from prompt_toolkit.key_binding import KeyBindings
+                kb = KeyBindings()
+
+                @kb.add("escape", "enter")
+                @kb.add("c-j")
+                def _newline(event):              # enter sends; esc enter / ctrl-j start a new line
+                    event.current_buffer.insert_text("\n")
                 os.makedirs(os.path.dirname(history), exist_ok=True) if history else None
-                self.session = PromptSession(history=FileHistory(history) if history else None,
-                                             completer=slash_completer(commands), complete_while_typing=True)
+                self.session = PromptSession(history=FileHistory(history) if history else None, key_bindings=kb,
+                                             completer=slash_completer(commands, lambda: self._paths()),
+                                             complete_while_typing=True)
             except (ImportError, OSError):
                 self.session = None
                 self.inp = input
+
+    def _paths(self):
+        """The repository's files for `@` completion, listed once (on the first `@`) and kept."""
+        if not hasattr(self, "_path_cache"):
+            self._path_cache = sorted(self.paths()) if self.paths else []
+        return self._path_cache
 
     def utf(self):
         return (self.console.encoding or "").lower().replace("-", "").startswith("utf")
@@ -481,7 +496,7 @@ class RichUI(PlainUI):
     def toolbar(self):
         s, sep = self.stats, f" {self.g('sep')} "
         cache = f"{sep}cache {s.get('cached', 0) / s['sent']:.0%}" if s.get("sent") else ""
-        return f" context {self.gauge(s)}{cache}{sep}/ for commands{sep}ctrl-d quits "
+        return f" context {self.gauge(s)}{cache}{sep}/ commands{sep}@ files{sep}! shell{sep}ctrl-d quits "
 
     def read(self):
         from rich.rule import Rule
@@ -539,13 +554,23 @@ def numbered_diff(diff, utf=True):
     return out
 
 
-def slash_completer(commands):
-    """prompt_toolkit completion for /commands, only while the line is a lone /word."""
+def slash_completer(commands, paths=None):
+    """prompt_toolkit completion: /commands while the line is a lone /word, and repository files after an `@`
+    anywhere in the line (a path segment typed anywhere in the path matches, at most 30 shown)."""
     from prompt_toolkit.completion import Completer, Completion
 
     class Slash(Completer):
         def get_completions(self, document, event):
             t = document.text_before_cursor
+            m = re.search(r"(?:^|\s)@([\w./\\-]*)$", t)
+            if m and paths is not None:
+                frag = m.group(1).replace("\\", "/").lower()
+                hits = [p for p in paths() if frag in p.lower()]
+                hits.sort(key=lambda p: (not p.lower().startswith(frag), not os.path.basename(p).lower()
+                                         .startswith(os.path.basename(frag)), len(p)))
+                for p in hits[:30]:
+                    yield Completion(p, start_position=-len(m.group(1)), display_meta="read before the turn")
+                return
             if not t.startswith("/") or " " in t:
                 return
             for name, desc in commands:

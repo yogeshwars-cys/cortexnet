@@ -16,6 +16,7 @@ import contextlib
 import difflib
 import hashlib
 import inspect
+import itertools
 import json
 import os
 import re
@@ -899,9 +900,46 @@ COMMANDS = [("/help", "list the commands"), ("/card", "show the task card"),
             ("/lint", "run the linter and show the agent: /lint [command]"),
             ("/learn", "training cases logged for the coprocessor"), ("/clear", "start a fresh conversation"),
             ("/files", "the spiking file manager: next-file guesses, agreement, learned weights"),
+            ("/memory", "the project notes loaded from AGENTS.md, CORTEX.md or CLAUDE.md"),
             ("/exit", "quit")]
-TYPED = [("#3 #7", "pull [connected] menu symbols into the conversation"),
-         ("read 2,5 [file]", "pull outline symbols 2 and 5 (numbers from /outline; the last file if omitted)")]
+TYPED = [("@path", "read that file through CortexNET before the model's turn, your message as the query"),
+         ("!command", "run a shell command now and put its output in the conversation"),
+         ("#3 #7", "pull [connected] menu symbols into the conversation"),
+         ("read 2,5 [file]", "pull outline symbols 2 and 5 (numbers from /outline; the last file if omitted)"),
+         ("esc enter", "a new line in your message (or ctrl-j)")]
+MEMORY_FILES = ("AGENTS.md", "CORTEX.md", "CLAUDE.md")
+MEMORY_HEAD = "\n\nProject notes from {name} (the repository's instructions for agents):\n"
+MENTION = re.compile(r"(?<![\w@])@([\w./\\-]+[\w])")
+
+
+def project_memory(root, cap):
+    """(file name, text) of the repository's instructions for agents, the first of MEMORY_FILES found at its root,
+    cut to `cap` tokens so it cannot crowd a small window; (None, "") when there is none."""
+    for name in MEMORY_FILES:
+        p = os.path.join(root, name)
+        if os.path.isfile(p):
+            with open(p, encoding="utf8", errors="replace") as f:
+                text = f.read().strip()
+            if tokens(text) > cap:
+                text = text[:cap * 4].rstrip() + f"\n[... {name} cut to {cap:,} tokens to fit the context window]"
+            return name, text
+    return None, ""
+
+
+def mention_reads(agent, line, most=3):
+    """`@path` in a message: each named file that exists is read through CortexNET before the model's turn, with the
+    message as the query, so even a model that rarely calls a tool starts from the right code. Returns the paths."""
+    done = []
+    for m in MENTION.finditer(line):
+        try:
+            p = agent.ws.path(m.group(1))
+        except ValueError:
+            continue
+        rel = agent.ws.rel(p)
+        if os.path.isfile(p) and rel not in done and len(done) < most:
+            done.append(rel)
+            agent.inject("read_file", {"path": rel, "query": MENTION.sub(r"\1", line)[:600]})
+    return done
 TEST_RX = re.compile(r"\b(pytest|unittest|go test|cargo test|npm (?:run )?test|yarn test|ctest|mvn test|gradle\w* test)\b")
 LINT_RX = re.compile(r"\b(ruff|flake8|pylint|mypy|eslint|golangci-lint|go vet|cargo clippy|clippy)\b")
 
@@ -944,6 +982,14 @@ def typed(agent, ui, line):
     """`#3 #7` (approve menu ids) and `read 2,5 [file]` (outline symbols by number): tool calls made at the prompt,
     no model call. Returns True when the line was one of them. A `cortex ...` shell command typed here is answered
     locally too: the model cannot change the CLI's options, and sending it would cost a call."""
+    if line.startswith("!") and line[1:].strip():
+        keep = agent.ws.confirm                  # the user typed the command: that is the confirmation
+        agent.ws.confirm = lambda *a: True
+        try:
+            agent.inject("run", {"command": line[1:].strip()})
+        finally:
+            agent.ws.confirm = keep
+        return True
     if re.match(r"(?:cortex(?:\.exe)?|python3? -m cortexnet\.cli)(?:\s|$)", line):
         ui.say("That is a shell command, and this is already a Cortex session. To change options, /exit and run it in "
                "the shell; add --resume to continue this conversation with the new options.")
@@ -1023,6 +1069,14 @@ def slash(agent, ui, line):
         ui.say("\n".join(f"  {n:<16} {d}" for n, d in COMMANDS + TYPED))
     elif cmd == "/card":
         ui.say(agent.card.render() if not agent.card.empty() else "no task card yet (the agent keeps one with `note`)")
+    elif cmd == "/memory":
+        name = getattr(agent, "memory", None)
+        if not name:
+            ui.say(f"no project notes: add {' or '.join(MEMORY_FILES)} at the repository root (or --no-memory was set)")
+        else:
+            text = agent.msgs[0]["content"].split(MEMORY_HEAD.format(name=name), 1)[-1]
+            ui.say(f"{name}, {tokens(text):,} tokens in the system prompt:\n" + text[:2000]
+                   + ("\n[...]" if len(text) > 2000 else ""))
     elif cmd == "/files":
         fm = agent.files
         if fm is None:
@@ -1175,7 +1229,13 @@ def main(argv=None):
                     help="continue the last session in this repository (or a saved session file)")
     ap.add_argument("--fork", action="store_true", help="with --resume: continue in a new session file and leave "
                     "the resumed one as it was")
+    ap.add_argument("--no-memory", action="store_true", help="do not load the project notes (AGENTS.md, CORTEX.md or "
+                    "CLAUDE.md at the repository root) into the system prompt")
+    ap.add_argument("--json", action="store_true", help="with a task: print one JSON object (the answer and the "
+                    "session's numbers) on stdout, progress on stderr; edits and commands are declined unless --yes")
     a = ap.parse_args(argv)
+    if a.json and not a.task:
+        ap.error("--json needs a task: cortex --json \"what does Reader.read return?\"")
     key = os.environ.get(a.key_env) if a.key_env else None
     base = a.base or ("http://127.0.0.1:8080/v1" if a.api == "openai" else "https://api.anthropic.com")
     backend = OpenAIChat(base, a.model, key) if a.api == "openai" else AnthropicMessages(base, a.model, key)
@@ -1191,12 +1251,23 @@ def main(argv=None):
         if not a.no_graph:
             from .graph import CoNeedGraph
             kw.update(graph=CoNeedGraph(), menu=True)
-    ui = make_ui(a.plain, history=os.path.join(root, ".cortexnet", "cli_history"), commands=COMMANDS)
+    if a.json:                                   # stdout carries only the JSON; a confirm prompt answers "no"
+        ui = PlainUI(out=lambda *x, **k: print(*x, file=sys.stderr, **k), inp=lambda *x: "n")
+    else:
+        ui = make_ui(a.plain, history=os.path.join(root, ".cortexnet", "cli_history"), commands=COMMANDS)
     ws = Workspace(root, Reader(os.path.join(root, ".cortexnet", "agent"), max_tokens=a.ctx // 4, **kw),
                    confirm=(lambda q, d: True) if a.yes else ui.confirm)
     tools = [t for t in TOOLS if t["function"]["name"] not in MUTATING] if a.plan else TOOLS
     agent = Agent(backend, ws, ctx=a.ctx, max_steps=a.max_steps, ui=ui, tools=tools,
                   system=SYSTEM + PLAN_LINE if a.plan else SYSTEM, hints=not a.no_hints)
+    agent.memory = None
+    if not a.no_memory:
+        name, text = project_memory(root, max(300, a.ctx // 10))
+        if name:
+            agent.memory = name
+            agent.msgs[0]["content"] += MEMORY_HEAD.format(name=name) + text
+    if hasattr(ui, "paths"):                     # `@` completion: the repository's files, listed on first use
+        ui.paths = lambda: [ws.rel(p) for p in itertools.islice(ws.files(root), 5000)]
     if not a.no_snn:
         from .filesnn import SpikingFileManager
         agent.files = SpikingFileManager(model=f"{a.api}:{a.model}", state_dir=os.path.join(root, ".cortexnet", "agent"))
@@ -1214,11 +1285,12 @@ def main(argv=None):
                                  "coprocessor + graph + menu" if a.coproc else "",
                                  "auto-approve" if a.yes else "",
                                  f"resumed {os.path.basename(resumed)}" + (" as a fork" if a.fork else "")
-                                 if resumed else "") if x)
+                                 if resumed else "", f"notes from {agent.memory}" if agent.memory else "") if x)
     ui.header(dict(repo=root, backend=f"{a.api} {a.model} @ {base}", ctx=a.ctx, mode=mode))
     if resumed:
         ui.status(agent.status())
     tasks = [" ".join(a.task)] if a.task else None
+    answer, t0 = "", time.time()
     while True:
         if tasks is not None:
             if not tasks:
@@ -1242,7 +1314,11 @@ def main(argv=None):
                 sessions.save(agent)
                 continue
         try:
-            ui.answer(agent.turn(user))
+            read = mention_reads(agent, user)
+            if read and not a.json:
+                ui.note("read before the model's turn: " + ", ".join(read))
+            answer = agent.turn(user)
+            ui.answer(answer)
         except KeyboardInterrupt:
             agent.interrupted()
             ui.note("stopped; the conversation so far is kept")
@@ -1251,10 +1327,15 @@ def main(argv=None):
             if tasks is not None:
                 sessions.save(agent)
                 agent.close()
+                if a.json:
+                    print(json.dumps(dict(ok=False, error=str(e), status=agent.status()), default=str))
                 return 1
         sessions.save(agent)
         ui.status(agent.status())
     agent.close()
+    if a.json:
+        print(json.dumps(dict(ok=True, answer=answer, seconds=round(time.time() - t0, 1), status=agent.status(),
+                              memory=agent.memory), default=str))
     return 0
 
 

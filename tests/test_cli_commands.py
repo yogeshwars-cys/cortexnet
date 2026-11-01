@@ -56,6 +56,37 @@ class CommandTest(unittest.TestCase):
         self.assertEqual((ag.backend.seen, len(ag.msgs)), ([], 1))
         self.assertFalse(typed(ag, ag.ui, "cortexnet looks slow, why?"))
 
+    def test_bang_runs_a_command_without_asking_and_shows_the_agent(self):
+        asked = []
+        ag, ws = self.agent(confirm=lambda q, d: asked.append(q) or False)   # the model's commands would be declined
+        self.assertTrue(typed(ag, ag.ui, "!python -c \"print(6 * 7)\""))
+        tool = [m for m in ag.msgs if m["role"] == "tool"][-1]
+        self.assertEqual(tool["name"], "run")
+        self.assertIn("42", tool["content"])
+        self.assertEqual((asked, ag.backend.seen), ([], []))             # typed by the user: no second question
+        self.assertFalse(typed(ag, ag.ui, "!"))                           # a lone ! is an ordinary message
+
+    def test_at_mention_reads_the_file_before_the_turn(self):
+        from cortexnet.cli import mention_reads
+        ag, ws = self.agent([("it adds the totals", [])])
+        read = mention_reads(ag, "what does @calc.py do with @nothing/here.py and mail@example.com?")
+        self.assertEqual(read, ["calc.py"])                              # missing files and e-mail addresses skipped
+        tool = [m for m in ag.msgs if m["role"] == "tool"][-1]
+        self.assertEqual(tool["name"], "read_file")
+        ag.turn("what does @calc.py do?")
+        self.assertIn("read_file", json.dumps(ag.backend.seen[0]))      # the model saw the read before answering
+
+    def test_project_memory_is_loaded_and_capped(self):
+        from cortexnet.cli import project_memory
+        self.assertEqual(project_memory(self.root, 300), (None, ""))
+        with open(os.path.join(self.root, "AGENTS.md"), "w") as f:
+            f.write("Run tests with pytest.\n" + "Use type hints everywhere. " * 400)
+        name, text = project_memory(self.root, 300)
+        self.assertEqual(name, "AGENTS.md")
+        self.assertTrue(text.startswith("Run tests with pytest."))
+        self.assertLess(len(text) // 4, 360)                             # cut to fit a small window, and says so
+        self.assertIn("cut to 300 tokens", text)
+
     def test_a_turn_after_typed_calls_sees_them_and_roles_alternate(self):
         ag, ws = self.agent([("the bug is on line 5", [])])
         typed(ag, ag.ui, "read 1 calc.py")

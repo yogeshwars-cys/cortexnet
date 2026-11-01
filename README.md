@@ -349,12 +349,25 @@ Cortex CLI was made to be tested on API and cloud models.
 pip install -e .                                   # installs the `cortex` command
 cortex                                             # interactive, in the current repo, llama-server on :8080
 cortex "make the failing test pass"                # one task, then exit
+cortex --json "what does Reader.read return?"      # one task, one JSON object on stdout (answer + session numbers)
 cortex --api anthropic --base https://api.meta.ai --model muse-spark-1.3 --key-env LLAMA_API_KEY
 cortex --api openai --base https://inference.baseten.co/v1 --model meta-models/muse-spark-open-1026 --key-env BASETEN_API_KEY
 ```
 
 Per-machine defaults for those four flags come from `CORTEX_API`, `CORTEX_BASE`, `CORTEX_MODEL` and `CORTEX_KEY_ENV`
 (flags still override them).
+
+At the prompt:
+
+| type | does |
+|---|---|
+| `@path` (tab completes) | reads that file through CortexNET before the model's turn, with your message as the query, so even a small model that rarely calls a tool starts from the right code |
+| `!command` | runs a shell command now and puts its output in the conversation |
+| `/` (tab completes) | local commands: `/context`, `/reads`, `/why`, `/outline`, `/map`, `/pin`, `/compact`, `/undo`, `/diff`, `/test`, `/lint`, `/files`, `/memory`, `/help` ... |
+| esc enter, ctrl-j | a new line in your message (enter sends) |
+
+**Project notes.** `AGENTS.md` (else `CORTEX.md`, else `CLAUDE.md`) at the repository root joins the system prompt,
+cut to a tenth of the context window so it cannot crowd a small model out; `/memory` shows it, `--no-memory` skips it.
 
 ![Cortex CLI start screen](docs/cortex_banner.png)
 
