@@ -1,17 +1,17 @@
-"""Bit-plane vector codec, ported from the Wormhole BPF64 engine (wormhole.cpp `Codec`, export_quantized_dual_funnel.py).
+"""Bit-plane vector codec: symbol vectors stored as compact codes and scored without decoding.
 
 fit      orthonormal basis V = top eigenvectors of the uncentred second moment (so x ~ V z and |V z| = |z|),
          coordinates sorted by variance; a greedy rate-distortion pass gives each coordinate 0..5 bits
          (non-increasing in variance, summing to exactly 8 * code_bytes); per-coordinate Lloyd-Max levels.
 encode   z = x V, index = bucket of z_j among the level midpoints, stored as bit-planes: plane p holds bit
          (b_j - 1 - p) of every coordinate with b_j > p, MSB first, planes concatenated, packed big-endian.
-score    asymmetric, as in wormhole: the query stays unquantised; a per-query table of (q_j * level, level^2)
+score    asymmetric: the query stays unquantised; a per-query table of (q_j * level, level^2)
          gives cosine(q, decoded doc) = sum_a / (|q_z| sqrt(sum_b)) straight from the codes.
 prefilter  plane 0 alone (one bit per coordinate, the top half / bottom half of its levels) scored with the
          query's conditional means: a coarse cosine that touches 1/8..1/2 of the code, then score() re-ranks.
 cells    plane-0 bits of the top m coordinates as an integer: a semantic cell id, free from the code.
 
-64 bytes is wormhole's code size; 128 and 256 bytes keep more coordinates and deeper planes.
+64 bytes is the default code size; 128 and 256 bytes keep more coordinates and deeper planes.
 """
 import numpy as np
 
